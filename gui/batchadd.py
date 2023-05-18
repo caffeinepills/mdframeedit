@@ -1,0 +1,71 @@
+from PyQt5 import QtWidgets, QtCore
+
+class Ui_BatchCreateAction(object):
+    def setupUi(self, BatchCreateAction):
+        BatchCreateAction.setObjectName("BatchCreateAction")
+        BatchCreateAction.resize(360, 277)
+        self.actionComboBox = QtWidgets.QComboBox(BatchCreateAction)
+        self.actionComboBox.setGeometry(QtCore.QRect(10, 150, 161, 31))
+        self.actionComboBox.setObjectName("actionComboBox")
+        self.copyComboBox = QtWidgets.QComboBox(BatchCreateAction)
+        self.copyComboBox.setGeometry(QtCore.QRect(190, 150, 161, 31))
+        self.copyComboBox.setObjectName("copyComboBox")
+        self.label = QtWidgets.QLabel(BatchCreateAction)
+        self.label.setGeometry(QtCore.QRect(20, 0, 331, 101))
+        self.label.setWordWrap(True)
+        self.label.setObjectName("label")
+        self.label_2 = QtWidgets.QLabel(BatchCreateAction)
+        self.label_2.setGeometry(QtCore.QRect(10, 130, 91, 20))
+        self.label_2.setObjectName("label_2")
+        self.label_3 = QtWidgets.QLabel(BatchCreateAction)
+        self.label_3.setGeometry(QtCore.QRect(190, 130, 101, 16))
+        self.label_3.setObjectName("label_3")
+        self.finalizeButtonBox = QtWidgets.QDialogButtonBox(BatchCreateAction)
+        self.finalizeButtonBox.setGeometry(QtCore.QRect(110, 240, 156, 23))
+        self.finalizeButtonBox.setLayoutDirection(QtCore.Qt.LeftToRight)
+        self.finalizeButtonBox.setStandardButtons(QtWidgets.QDialogButtonBox.Apply|QtWidgets.QDialogButtonBox.Cancel)
+        self.finalizeButtonBox.setCenterButtons(False)
+        self.finalizeButtonBox.setObjectName("finalizeButtonBox")
+        self.indexSpinBox = QtWidgets.QSpinBox(BatchCreateAction)
+        self.indexSpinBox.setGeometry(QtCore.QRect(40, 210, 41, 22))
+        self.indexSpinBox.setMinimum(-1)
+        self.indexSpinBox.setMaximum(999)
+        self.indexSpinBox.setProperty("value", -1)
+        self.indexSpinBox.setObjectName("indexSpinBox")
+        self.label_4 = QtWidgets.QLabel(BatchCreateAction)
+        self.label_4.setGeometry(QtCore.QRect(40, 190, 47, 13))
+        self.label_4.setObjectName("label_4")
+        self.overwriteCheckbox = QtWidgets.QCheckBox(BatchCreateAction)
+        self.overwriteCheckbox.setGeometry(QtCore.QRect(100, 210, 121, 17))
+        self.overwriteCheckbox.setChecked(True)
+        self.overwriteCheckbox.setObjectName("overwriteCheckbox")
+        self.directoryLineEdit = QtWidgets.QLineEdit(BatchCreateAction)
+        self.directoryLineEdit.setGeometry(QtCore.QRect(10, 100, 301, 20))
+        self.directoryLineEdit.setObjectName("directoryLineEdit")
+        self.openDirectory = QtWidgets.QPushButton(BatchCreateAction)
+        self.openDirectory.setGeometry(QtCore.QRect(320, 100, 31, 21))
+        self.openDirectory.setObjectName("openDirectory")
+        self.fullDataCheckbox = QtWidgets.QCheckBox(BatchCreateAction)
+        self.fullDataCheckbox.setEnabled(True)
+        self.fullDataCheckbox.setGeometry(QtCore.QRect(200, 210, 101, 17))
+        self.fullDataCheckbox.setChecked(False)
+        self.fullDataCheckbox.setObjectName("fullDataCheckbox")
+
+        self.retranslateUi(BatchCreateAction)
+        QtCore.QMetaObject.connectSlotsByName(BatchCreateAction)
+
+    def retranslateUi(self, BatchCreateAction):
+        _translate = QtCore.QCoreApplication.translate
+        BatchCreateAction.setWindowTitle(_translate("BatchCreateAction", "Batch Add Action"))
+        self.label.setText(_translate("BatchCreateAction", "Batch add animation action name to all FrameData.xml in destination folder and all subfolders.\n"
+"Will be considered a copy action until manually overwritten. The copy action MUST exist in all FrameData you write to.\n"
+"If an Index ID is not specified, the original index will be used. Avoid collisions with other ID\'s unless you intend to overwrite."))
+        self.label_2.setText(_translate("BatchCreateAction", "Action to Apply"))
+        self.label_3.setText(_translate("BatchCreateAction", "Fallback / Copy From"))
+        self.label_4.setText(_translate("BatchCreateAction", "Index ID"))
+        self.overwriteCheckbox.setText(_translate("BatchCreateAction", "Overwrite"))
+        self.openDirectory.setText(_translate("BatchCreateAction", "..."))
+        self.fullDataCheckbox.setText(_translate("BatchCreateAction", "Write Full Data"))
+
+
+

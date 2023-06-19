@@ -1,13 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-
 block_cipher = None
-
 
 a = Analysis(['main.py'],
              pathex=[],
              binaries=[],
-             datas=[],
+             datas=[
+                ('shadow.png', '.')
+             ],
              hiddenimports=[],
              hookspath=[],
              hooksconfig={},

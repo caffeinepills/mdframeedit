@@ -14,14 +14,14 @@ If you want to build yourself, you can do so via Pyinstaller: pyinstaller MDFram
 Download for a Windows version is provided.
 
 1.1: 
-Fix: The original of a copy is no longer set as a copy preventing copy loop.
-Fix: No longer writes -1 as the index ID if it does not exist. It is omitted now.
-Fix: Animation speed label no longer squashed on some display settings.
-Change: Trim/Collapse save options are now default.
-Add: Error message if OpenGL version is not supported.
-Add: Image to readme.
-
+* Fix: The original of a copy is no longer set as a copy preventing copy loop.
+* Fix: No longer writes -1 as the index ID if it does not exist. It is omitted now.
+* Fix: Animation speed label no longer squashed on some display settings.
+* Change: Trim/Collapse save options are now default.
+* Add: Error message if OpenGL version is not supported.
+* Add: Image to readme.
+ 
 1.0:
-Initial Release
+* Initial Release
 
 ![img.png](img.png)

@@ -415,8 +415,8 @@ class AnimationEditor:
         self.settings = QSettings('MDFrameEditor', 'Frame Editor')
         self.recentFiles = self.settings.value('recent', [])
 
-        self.enableTrim = self.settings.value('trim', False, bool)
-        self.enableCollapse = self.settings.value('collapse', False, bool)
+        self.enableTrim = self.settings.value('trim', True, bool)
+        self.enableCollapse = self.settings.value('collapse', True, bool)
 
         self.ui.actionCollapse_Singles.setChecked(self.enableCollapse)
         self.ui.actionTrim_Copies.setChecked(self.enableTrim)

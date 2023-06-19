@@ -8,7 +8,7 @@ from functools import partial
 from typing import Optional
 import pyglet
 
-pyglet.options["pcom_mta"] = False
+pyglet.options["com_mta"] = False
 import warnings
 
 warnings.simplefilter("ignore", UserWarning)
@@ -225,9 +225,17 @@ class PygletWidget(QtWidgets.QOpenGLWidget):
 
         self.batch = pyglet.graphics.Batch()
 
-        self._default_program = pyglet.graphics.shader.ShaderProgram(
-            pyglet.graphics.shader.Shader(self._default_vertex_source, 'vertex'),
-            pyglet.graphics.shader.Shader(self._default_fragment_source, 'fragment'))
+        try:
+            self._default_program = pyglet.graphics.shader.ShaderProgram(
+                pyglet.graphics.shader.Shader(self._default_vertex_source, 'vertex'),
+                pyglet.graphics.shader.Shader(self._default_fragment_source, 'fragment'))
+        except:
+            self.error_dialog = QtWidgets.QMessageBox()
+            self.error_dialog.setWindowTitle("Error")
+            self.error_dialog.setIcon(QtWidgets.QMessageBox.Critical)
+            self.error_dialog.setText("Could not compile shader. Requires OpenGL 3.3 capability.")
+            self.error_dialog.exec()
+            sys.exit(app.exec_())
 
         self.ubo = self._default_program.uniform_blocks['WindowBlock'].create_ubo()
 
@@ -638,7 +646,9 @@ class AnimationEditor:
     def createAnimGroupXML(self, animEl: ElementTree.Element, name: str, index: int, group: AnimGroup, collapse,
                            trim=False, copyName="") -> bool:
         ElementTree.SubElement(animEl, "Name").text = name
-        ElementTree.SubElement(animEl, "Index").text = str(index)
+
+        if index != -1:
+            ElementTree.SubElement(animEl, "Index").text = str(index)
 
         if trim:
             if copyName:
@@ -665,7 +675,6 @@ class AnimationEditor:
                         ct += 1
                         break
 
-            print("COLLAPSEABLE", name, ct)
             if ct == 8:
                 # All 8 frames are the same.
                 isCollapsable = True
@@ -1328,29 +1337,6 @@ class AnimationEditor:
             else:
                 print(f"Copy {name} not found")
                 continue
-
-        # Label Copies.
-        actionItems: List[AnimGroupItem] = self._getActionListItems()
-        for action in self.groups:
-            for comparedAction in self.groups:
-                if action.copyName and action.name == comparedAction.name:
-                    continue
-
-                if action.name == comparedAction.name:
-                    # Only check the actions before itself, unless it's specifically a copy.
-                    break
-
-                if action.rushFrame == comparedAction.rushFrame and \
-                        action.returnFrame == comparedAction.returnFrame and \
-                        action.hitFrame == comparedAction.hitFrame and \
-                        action.directions == comparedAction.directions:
-                    # Update list label.
-                    for item in actionItems:
-                        if item.animGroup == action:
-                            item.animGroup.copyName = comparedAction.name
-                            item.updateText()
-                            break
-                    break
 
         self.ui.statusBar.showMessage("Frame data and images loaded successfully.", 3000)
 

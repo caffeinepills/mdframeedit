@@ -669,11 +669,10 @@ class AnimationEditor:
         isCollapsable = False
         if collapse:
             ct = 0
-            for idx1, sq in enumerate(group.directions):
-                for idx2, sq2 in enumerate(group.directions):
-                    if idx1 != idx2 and sq.frames == sq2.frames:
-                        ct += 1
-                        break
+            first = group.directions[0].frames
+            for direction in group.directions:
+                if direction.frames == first:
+                    ct += 1
 
             if ct == 8:
                 # All 8 frames are the same.

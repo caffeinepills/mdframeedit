@@ -2,7 +2,7 @@ from dataclasses import field, dataclass
 from enum import Enum
 from typing import List
 
-VERSION = "1.2"
+VERSION = "1.3"
 
 RIGHT = 6
 UP_RIGHT = 5
@@ -70,6 +70,9 @@ class Offset:
     x: int = 0  # XOffset
     y: int = 0  # YOffset
 
+    def __eq__(self, other):
+        return self.x == other.x and self.y == other.y
+
     def __add__(self, other):
         return Offset(self.x + other.x,
                       self.y + other.y)
@@ -102,6 +105,9 @@ class Offset:
             return Offset(self.x // other.x,
                           self.y // other.y)
 
+    def invertY(self):
+        return Offset(self.x, -self.y)
+
 
 @dataclass
 class AnimFrame:
@@ -115,10 +121,13 @@ class AnimFrame:
 
     def __post_init__(self):
         if not self.isDefaultCopy:
-            self.defaultCopy = AnimFrame(self.idx, self.frameIndex, self.flip, self.duration,
-                                         Offset(self.shadowOffset.x, self.shadowOffset.y),
-                                         Offset(self.spriteOffset.x, self.spriteOffset.y),
-                                         isDefaultCopy=True)
+            self.reset()
+
+    def reset(self):
+        self.defaultCopy = AnimFrame(self.idx, self.frameIndex, self.flip, self.duration,
+                                     Offset(self.shadowOffset.x, self.shadowOffset.y),
+                                     Offset(self.spriteOffset.x, self.spriteOffset.y),
+                                     isDefaultCopy=True)
 
     @property
     def changed(self):
@@ -137,6 +146,182 @@ class AnimGroup:
     rushFrame: int = -1
     hitFrame: int = -1
     returnFrame: int = -1
-    directions: List[AnimationSequence] = field(default_factory=lambda: [AnimationSequence()] * 8)  # 8 directions.
+    directions: List[AnimationSequence] = field(default_factory=lambda: [AnimationSequence() for _ in range(8)])  # 8 directions.
     copyName: str = field(compare=False, default='')  # If it is a copy of another group.
     modified: bool = field(compare=False, default=False)  # If it has been modified since loading.
+
+
+@dataclass
+class Rectangle:
+    x: int
+    y: int
+    width: int
+    height: int
+
+    @property
+    def left(self):
+        return self.x
+
+    @property
+    def right(self):
+        return self.x + self.width
+
+    @property
+    def bottom(self):
+        return self.y
+
+    @property
+    def top(self):
+        return self.y + self.height
+
+    def values(self):
+        return self.x, self.y, self.width, self.height
+
+    def __add__(self, other):
+        if isinstance(other, tuple):
+            return Rectangle(self.x + other[0], self.y + -other[1], self.width, self.height)
+        else:
+            return Rectangle(self.x + other.x, self.y + other.y, self.width, self.height)
+
+    def __repr__(self):
+        return f"Rectangle(x={self.x}, y={self.y}, width={self.width}, height={self.height}, ltrb={(self.left, self.top, self.right, self.bottom)})"
+
+
+@dataclass
+class TLRectangle:
+    x: int
+    y: int
+    width: int
+    height: int
+
+    @property
+    def left(self):
+        return self.x
+
+    @property
+    def right(self):
+        return self.x + self.width
+
+    @property
+    def bottom(self):
+        return self.y + self.height
+
+    @property
+    def top(self):
+        return self.y
+
+    def values(self):
+        return self.x, self.y, self.width, self.height
+
+    def __add__(self, other):
+        if isinstance(other, tuple):
+            return TLRectangle(self.x + other[0], self.y + other[1], self.width, self.height)
+        else:
+            return TLRectangle(self.x + other.x, self.y + other.y, self.width, self.height)
+
+    @classmethod
+    def fromBounds(cls, bounds: tuple[int, int, int, int]):
+        return cls(bounds[0], bounds[1], bounds[2]-bounds[0], bounds[3]-bounds[1])
+
+    def getFlip(self):
+        return TLRectangle(-self.right, self.y, self.width, self.height)
+
+    def __repr__(self):
+        return f"TLRectangle(x={self.x}, y={self.y}, width={self.width}, height={self.height}, ltrb={(self.left, self.top, self.right, self.bottom)})"
+
+def centerBounds(rect: Rectangle):
+    minX = min(rect.x, -rect.right)
+    minY = min(rect.y, -rect.top)
+
+    maxX = max(-rect.x, rect.right)
+    maxY = max(-rect.y, rect.top)
+    return Rectangle(minX, minY, maxX - minX, maxY - minY)
+
+@dataclass
+class ActionPoints:
+    leftHand: Offset = Offset() # red[1]
+    center: Offset = Offset()  # green[2]
+    rightHand: Offset = Offset()  # blue[3]
+    head: Offset = Offset() # black
+    shadow: Offset = Offset()  # white[4]
+
+    @property
+    def centerFlip(self):
+        return self._flip(self.center)
+
+    @property
+    def headFlip(self):
+        return self._flip(self.head)
+
+    @property
+    def leftHandFlip(self):
+        return self._flip(self.leftHand)
+
+    @property
+    def rightHandFlip(self):
+        return self._flip(self.rightHand)
+
+    def add(self, offset: Offset):
+        self.center += offset
+        self.leftHand += offset
+        self.rightHand += offset
+        self.head += offset
+
+    def flip(self, offset: Offset, width: int):
+        return Offset(width-offset.x - 1, offset.y)
+
+    def _flip(self, offset: Offset):
+        return Offset(-offset.x - 1, offset.y)
+
+    def equals(self, other: 'ActionPoints', flip: bool, oddWidth: bool):
+        # print("equals", self)
+        # print("other", other)
+        center = other.center
+        head = other.head
+        leftHand = other.leftHand
+        rightHand = other.rightHand
+
+        if flip:
+            #print("--- flip", width)
+            # center = self.flip(other.center, width) + Offset(1 if oddWidth else 0, 0)
+            # head = self.flip(other.head, width) + Offset(1 if oddWidth else 0, 0)
+            # leftHand = self.flip(other.leftHand, width) + Offset(1 if oddWidth else 0, 0)
+            # rightHand = self.flip(other.rightHand, width) + Offset(1 if oddWidth else 0, 0)
+
+            center = other.centerFlip + Offset(1 if oddWidth else 0, 0)
+            head = other.headFlip + Offset(1 if oddWidth else 0, 0)
+            leftHand = other.leftHandFlip + Offset(1 if oddWidth else 0, 0)
+            rightHand = other.rightHandFlip + Offset(1 if oddWidth else 0, 0)
+            #
+            #
+            # print(leftHand, self.leftHand)
+            # print(center, self.center)
+            # print(rightHand, self.rightHand)
+            # print(head, self.head)
+
+        if self.center != center:
+            return False
+        if self.head != head:
+            return False
+        if self.leftHand != leftHand:
+            return False
+        if self.rightHand != rightHand:
+            return False
+
+        return True
+
+    # Top left
+    # def getRect(self):
+    #     top = min(min(self.center.y, self.head.y), min(self.leftHand.y, self.rightHand.y))
+    #     left = min(min(self.center.x, self.head.x), min(self.leftHand.x, self.rightHand.x))
+    #     bottom = max(max(self.center.y, self.head.y), max(self.leftHand.y, self.rightHand.y)) + 1
+    #     right = max(max(self.center.x, self.head.x), max(self.leftHand.x, self.rightHand.x)) + 1
+    #     return Rectangle(left, top, right - left, bottom - top)
+
+    def getRect(self):
+        left = min(min(self.center.x, self.head.x), min(self.leftHand.x, self.rightHand.x))
+        top = min(min(self.center.y, self.head.y), min(self.leftHand.y, self.rightHand.y))
+        right = max(max(self.center.x, self.head.x), max(self.leftHand.x, self.rightHand.x)) + 1
+        bottom = max(max(self.center.y, self.head.y), max(self.leftHand.y, self.rightHand.y)) + 1
+
+        return Rectangle(left, bottom, right-left, top-bottom)

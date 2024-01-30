@@ -13,10 +13,13 @@ If you want to build yourself, you can do so via Pyinstaller: pyinstaller MDFram
 
 Download for a Windows version is provided
 
+----
+
 1.3:
-Add: You can now load multi-sheet images and data.
-Add: You can now export new multi-sheets and single sheets.
-Fix: Crash when changing frame index numbers.
+* Add: You can now load multi-sheet images and data.
+* Add: You can now export new multi-sheets and single sheets.
+* Fix: Crash when changing frame index numbers.
+* Fix: Blank AnimSequences referring to the same set of data.
 
 1.2:
 * Fix: Collapsable accidentally combining if there was just 1 other direction that matched.

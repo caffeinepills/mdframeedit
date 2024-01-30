@@ -11,7 +11,15 @@ Collapse Singles: If there is only one sequence that is the same for all 8 direc
 
 If you want to build yourself, you can do so via Pyinstaller: pyinstaller MDFrameEditor.spec
 
-Download for a Windows version is provided.
+Download for a Windows version is provided
+
+1.3:
+Add: You can now load multi-sheet images and data.
+Add: You can now export new multi-sheets and single sheets.
+Fix: Crash when changing frame index numbers.
+
+1.2:
+* Fix: Collapsable accidentally combining if there was just 1 other direction that matched.
 
 1.1: 
 * Fix: The original of a copy is no longer set as a copy preventing copy loop.
@@ -23,5 +31,13 @@ Download for a Windows version is provided.
  
 1.0:
 * Initial Release
+
+Known Issue
+* False virus notification. Due to PyInstaller (the packaging utility) being used by people to package malicious 
+ programs, many anti-virus programs may flag the program. Add an exception to the directory you will keep the program at.
+ 
+  https://support.microsoft.com/en-us/windows/add-an-exclusion-to-windows-security-811816c0-4dfd-af4a-47e4-c301afe13b26
+* If you don't trust the release versions, you can download the source and package it into an executable yourself.
+
 
 ![img.png](img.png)

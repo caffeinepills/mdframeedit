@@ -8,8 +8,7 @@ import xml.etree.ElementTree as ElementTree
 from functools import partial
 from typing import Optional, Tuple, Set
 import pyglet
-from PIL import Image, ImageDraw, ImageOps
-from pyglet.image.codecs.png import PNGImageEncoder
+from PIL import Image, ImageDraw
 
 pyglet.options["com_mta"] = False
 import warnings
@@ -27,9 +26,8 @@ from pyglet.math import clamp
 from data import *
 from gui.batchadd import Ui_BatchCreateAction
 from gui.editor import Ui_MainWindow
-from utils import TopLeftGrid, Camera, checkDuplicateImages, roundUpToMult, center_and_apply_offset, flip_image_x_axis, \
-    findPixelBounds, getShadowLocationFromImage, getActionPointsFromImage, getActionPointsFromPILImage, \
-    getShadowLocationFromPILImage
+from utils import (TopLeftGrid, Camera, checkDuplicateImages, roundUpToMult, centerAndApplyOffset,
+                   getActionPointsFromImage, getActionPointsFromPILImage, getShadowLocationFromPILImage)
 
 pyglet.image.Texture.default_min_filter = GL_NEAREST
 pyglet.image.Texture.default_mag_filter = GL_NEAREST
@@ -352,11 +350,11 @@ class BatchAddImplementation:
                                         if overwrite:
                                             # Clear existing anim.
                                             actionAnim.clear()
-                                            self.editor.createBaseAnimGroupXML(actionAnim, useAction.name, groupIdx,
+                                            if self.editor.createBaseAnimGroupXML(actionAnim, useAction.name, groupIdx,
                                                                                copyAction,
                                                                                trim=not fulldata,
-                                                                               copyName=copyAction.name)
-                                            self.editor.createSingleSheetFrameData(actionAnim, copyAction, collapse)
+                                                                               copyName=copyAction.name):
+                                                self.editor.createSingleSheetFrameData(actionAnim, copyAction, collapse)
 
                                             write = True
                                         else:
@@ -364,10 +362,10 @@ class BatchAddImplementation:
 
                         if not exists:
                             animEl = ElementTree.SubElement(animsEl, "Anim")
-                            self.editor.createBaseAnimGroupXML(animEl, useAction.name, groupIdx, copyAction,
+                            if self.editor.createBaseAnimGroupXML(animEl, useAction.name, groupIdx, copyAction,
                                                                trim=not fulldata,
-                                                               copyName=copyAction.name)
-                            self.editor.createSingleSheetFrameData(animEl, copyAction, collapse)
+                                                               copyName=copyAction.name):
+                                self.editor.createSingleSheetFrameData(animEl, copyAction, collapse)
                             write = True
 
                         if write:
@@ -414,7 +412,7 @@ class BatchAddImplementation:
 REDUCE_RUSH_FRAMES = False
 
 class AnimationEditor:
-    shadowImage: Optional[pyglet.image.ImageData]
+    shadowImage: Optional[pyglet.image.AbstractImage]
     sprite: Optional[pyglet.sprite.Sprite]
     animationSpeedSliderValues = (0.1, 0.25, 0.5, 1, 2)
     maxRecent = 5
@@ -461,14 +459,9 @@ class AnimationEditor:
         self.actionGrid: Optional[TopLeftGrid] = None
         self.actionPoints: dict[int, ActionPoints] = {}
 
-        shadow = pyglet.image.load("shadow.png")
-        self.shadows = TopLeftGrid(shadow, columns=3, rows=1)
-
-        for shadow in self.shadows:
-            shadow.anchor_x = shadow.width // 2
-            shadow.anchor_y = (shadow.height // 2) + 1
-
-        self.shadowImage = None
+        self.shadowImage = pyglet.image.load("shadow.png")
+        self.shadowImage.anchor_x = self.shadowImage.width // 2
+        self.shadowImage.anchor_y = (self.shadowImage.height // 2) + 1
 
         self.sprite = None
         self.shadow: Optional[pyglet.sprite.Sprite] = None
@@ -478,6 +471,11 @@ class AnimationEditor:
         self.newWindow = None
 
         self.singleLoaded = None
+
+        # Set when opened for non-XML access.
+        self.frameWidth = 0
+        self.frameHeight = 0
+        self.shadowSize = 0
 
         self.copiedSequence: Optional[AnimationSequence] = None
 
@@ -652,9 +650,9 @@ class AnimationEditor:
 
         root = ElementTree.Element("AnimData")
 
-        ElementTree.SubElement(root, "FrameWidth").text = existingRoot.find("FrameWidth").text
-        ElementTree.SubElement(root, "FrameHeight").text = existingRoot.find("FrameHeight").text
-        ElementTree.SubElement(root, "ShadowSize").text = existingRoot.find("ShadowSize").text
+        ElementTree.SubElement(root, "FrameWidth").text = str(self.frameWidth)
+        ElementTree.SubElement(root, "FrameHeight").text = str(self.frameHeight)
+        ElementTree.SubElement(root, "ShadowSize").text = str(self.shadowSize)
 
         animsEl = ElementTree.SubElement(root, "Anims")
 
@@ -662,9 +660,9 @@ class AnimationEditor:
 
         for groupAnim in self.groups:
             animEl = ElementTree.SubElement(animsEl, "Anim")
-            self.createBaseAnimGroupXML(animEl, groupAnim.name, groupAnim.idx, groupAnim, trim=trim,
-                                        copyName=groupAnim.copyName)
-            self.createSingleSheetFrameData(animEl, groupAnim, collapse)
+            if self.createBaseAnimGroupXML(animEl, groupAnim.name, groupAnim.idx, groupAnim, trim=trim,
+                                        copyName=groupAnim.copyName):
+                self.createSingleSheetFrameData(animEl, groupAnim, collapse)
 
         ElementTree.indent(root)
 
@@ -718,6 +716,8 @@ class AnimationEditor:
         if group.returnFrame != -1:
             ElementTree.SubElement(animEl, "ReturnFrame").text = str(group.returnFrame)
 
+        return True
+
     def createSingleSheetFrameData(self, animEl: ElementTree.Element, group: AnimGroup, collapse):
         sequencesEle = ElementTree.SubElement(animEl, "Sequences")
 
@@ -733,7 +733,7 @@ class AnimationEditor:
 
                 ElementTree.SubElement(frameEle, "FrameIndex").text = str(frame.frameIndex)
                 ElementTree.SubElement(frameEle, "Duration").text = str(frame.duration)
-                ElementTree.SubElement(frameEle, "HFlip").text = str(frame.flip)
+                ElementTree.SubElement(frameEle, "HFlip").text = str(int(frame.flip))
                 spriteOff = ElementTree.SubElement(frameEle, "Sprite")
                 ElementTree.SubElement(spriteOff, "XOffset").text = str(frame.spriteOffset.x)
                 ElementTree.SubElement(spriteOff, "YOffset").text = str(frame.spriteOffset.y)
@@ -762,7 +762,6 @@ class AnimationEditor:
             uniformDurations.add(durations)
 
             if len(uniformDurations) > 1:
-                print(uniformDurations)
                 # Check if frame count differs between directions.
                 firstLength = len(next(iter(uniformDurations), ()))
                 for t in uniformDurations:
@@ -1293,8 +1292,6 @@ class AnimationEditor:
             animIdx = len(self.currentSequence.frames)
             animFrame = AnimFrame(animIdx, frameIdx)
 
-            print("ANIM FRAME", animFrame)
-
             self._addAnimFrame(animFrame)
 
             self.clearCopyGroup()
@@ -1340,9 +1337,14 @@ class AnimationEditor:
         try:
             width = int(root.find("FrameWidth").text)
             height = int(root.find("FrameHeight").text)
+            shadowSize = int(root.find("ShadowSize").text)
         except AttributeError:
             self.ui.statusBar.showMessage("Unable to determine dimensions of XML data.", 5000)
             return
+
+        self.frameWidth = width
+        self.frameHeight = height
+        self.shadowSize = shadowSize
 
 
         anims = root.find('Anims')
@@ -1353,8 +1355,6 @@ class AnimationEditor:
         self.imageGrid = TopLeftGrid(self.sheetImage,
                                      rows=self.sheetImage.height // height,
                                      columns=self.sheetImage.width // width)
-
-        self.shadowImage = self.shadows[int(root.find("ShadowSize").text)]
 
         if self.actionPtImage:
             self.actionGrid = TopLeftGrid(self.actionPtImage,
@@ -1376,7 +1376,6 @@ class AnimationEditor:
                     self.actionPoints[idx] = ActionPoints(leftHand, center, rightHand, head)
 
                 else:
-                    print("FAILED")
                     self.actionGrid = None
                     break
 
@@ -1434,10 +1433,10 @@ class AnimationEditor:
                             if REDUCE_RUSH_FRAMES:
                                 if rushFrame > -1:
                                     frame2 = frameSeqIdx -1
-                                    print(frame2, rushFrame, name, frames)
+                                    #print(frame2, rushFrame, name, frames)
                                     if frame2 > rushFrame:
-                                        print("NAME", name)
-                                        print("FRAME!", name, self.adjustOffset(rushFrame, frame2, frames[rushFrame].spriteOffset, spriteOffset))
+                                        #print("NAME", name)
+                                        #print("FRAME!", name, self.adjustOffset(rushFrame, frame2, frames[rushFrame].spriteOffset, spriteOffset))
 
                                         frames[frame2].spriteOffset = self.adjustOffset(rushFrame, frame2, frames[rushFrame].spriteOffset, spriteOffset)
                                         frames[frame2].shadowOffset = self.adjustOffset(rushFrame, frame2,
@@ -1619,6 +1618,12 @@ class AnimationEditor:
             self.ui.statusBar.showMessage(f"Unable to find any Animation XML data.", 5000)
             return
 
+        try:
+            shadowSize = int(root.find("ShadowSize").text)
+        except AttributeError:
+            self.ui.statusBar.showMessage("Unable to determine dimensions of XML data.", 5000)
+            return
+
         self.clear()
 
         self.singleLoaded = False
@@ -1705,13 +1710,13 @@ class AnimationEditor:
             if (shadowImage.width != animImage.width or shadowImage.height != animImage.height or
                 animImage.width != offsetImage.width or animImage.height != offsetImage.height or
                 offsetImage.width != animImage.width or offsetImage.height != animImage.height):
-                return self.createErrorPopup(f"Dimensions of Anims, Shadows, and Offsets do not match.")
+                return self.createErrorPopup(f"Dimensions of Anims, Shadows, and Offsets do not match for {name}.")
 
             if frameWidth == 0 or frameHeight == 0:
-                return self.createErrorPopup("Could not find frame dimensions.")
+                return self.createErrorPopup(f"Could not find frame dimensions for {name}.")
 
             if animImage.width % frameWidth != 0 or animImage.height % frameHeight != 0:
-                return self.createErrorPopup("Animation must be divisible by frame dimensions.")
+                return self.createErrorPopup(f"Animation must be divisible by frame dimensions for {name}.")
 
             frameXCount = animImage.width // frameWidth
             sequenceCount = frameYCount = animImage.height // frameHeight
@@ -1729,10 +1734,7 @@ class AnimationEditor:
 
             #grid = TopLeftGrid(animImage, rows=frameYCount, columns=frameXCount)
             #offsetGrid = TopLeftGrid(offsetImage, rows=frameYCount, columns=frameXCount)
-            shadowGrid = None
-
-            if shadowImage:
-                shadowGrid = TopLeftGrid(shadowImage, rows=frameYCount, columns=frameXCount)
+            shadowGrid = TopLeftGrid(shadowImage, rows=frameYCount, columns=frameXCount)
 
             for i in range(sequenceCount):
                 sequenceIdx = (sequenceCount - i) % sequenceCount
@@ -1763,8 +1765,6 @@ class AnimationEditor:
 
                     actionPointLoc = getActionPointsFromPILImage(actionPointFrame)
 
-                    #print("actionPointLoc", actionPointLoc)
-
                     frameCenter = croppedFrame.width // 2, croppedFrame.height // 2
 
                     actionPoints = ActionPoints(Offset(*frameCenter), Offset(*frameCenter), Offset(*frameCenter), Offset(*frameCenter))
@@ -1794,7 +1794,7 @@ class AnimationEditor:
                     animFrame = AnimFrame(len(group.directions[sequenceIdx].frames))
 
                     offsetX = croppedFrame.x - ((frameWidth // 2) - (croppedFrame.width // 2) )
-                    offsetY = croppedFrame.bottom - (frameHeight // 2) - (croppedFrame.height // 2 )
+                    offsetY = croppedFrame.y - ((frameHeight // 2) - (croppedFrame.height // 2 ))
 
                     animFrame.spriteOffset = Offset(offsetX, offsetY)
                     animFrame.duration = durations[frameIdx]
@@ -1820,7 +1820,7 @@ class AnimationEditor:
         maxWidth = roundUpToMult(maxWidth, 2)
         maxHeight = roundUpToMult(maxHeight, 2)
 
-        uniqueImages, oldFrameToNewFrame, uniqueBodyPoints, oldIdxToNewIdx = checkDuplicateImages(frames, True)
+        uniqueImages, oldFrameToNewFrame, uniqueBodyPoints = checkDuplicateImages(frames, True)
 
         maxTexSize = int(math.ceil(math.sqrt(len(uniqueImages))))
 
@@ -1875,26 +1875,6 @@ class AnimationEditor:
                 if oldFrame[0].width % 2 == 1:
                     newFrame.spriteOffset.x += 1
 
-        # for frameIdx, bp in enumerate(uniqueBodyPoints):
-        #     startX = maxWidth * (frameIdx % maxTexSize)
-        #     startY = (maxHeight * (frameIdx // maxTexSize))
-        #
-        #     bpStartX = startX + maxWidth // 2
-        #     bpStartY = startY + maxHeight // 2
-        #
-        #     startOffset = Offset(bpStartX, bpStartY)
-        #
-        #     lh = startOffset + bp.leftHand
-        #     center  = startOffset + bp.center
-        #     rh = startOffset + bp.rightHand
-        #     head = startOffset + bp.head
-        #
-        #     apDraw.point((lh.x, lh.y), fill=(255, 0, 0, 255))
-        #     apDraw.point((center.x, center.y), fill=(0, 255, 0, 255))
-        #     apDraw.point((rh.x, rh.y), fill=(0, 0, 255, 255))
-        #     apDraw.point((head.x, head.y ), fill=(0, 0, 0, 255))
-
-
         # Flip back clockwise.
         for group in self.groups:
             group.directions = [group.directions[0], *reversed(group.directions[1:])]
@@ -1935,6 +1915,10 @@ class AnimationEditor:
                 continue
 
         self.sheetImage = pyglet.image.ImageData(sheet.width, sheet.height, 'RGBA', sheet.tobytes(), pitch=-sheet.width * 4)
+
+        self.frameWidth = maxWidth
+        self.frameHeight = maxHeight
+        self.shadowSize = shadowSize
 
         self.actionPtImage = pyglet.image.ImageData(apSheet.width, apSheet.height, 'RGBA', apSheet.tobytes(),
                                                  pitch=-apSheet.width * 4)
@@ -1987,21 +1971,39 @@ class AnimationEditor:
         tree = ElementTree.ElementTree(root)
         tree.write(fileName, encoding='utf-8', xml_declaration=True)
 
+    def exportSingleSheet(self):
+        if self.loadedTree:
+            options = QFileDialog.Options()
+            options |= QFileDialog.ShowDirsOnly
+
+            directory = QFileDialog.getExistingDirectory(self.window, "Select Directory for Single Sheet", "", options)
+
+            if directory:
+                self._exportSingleSheet(directory)
+
+    def _exportSingleSheet(self, directory):
+        self._saveFrameData(f"{directory}/FrameData.xml")
+
+        self.sheetImage.save(f"{directory}/Anim.png")
+
+        if self.actionPtImage:
+            self.actionPtImage.save(f"{directory}/Offsets.png")
+
+        self.ui.statusBar.showMessage("Single sheet was output successfully.", 3000)
+
     def exportMultipleSheets(self):
         if self.loadedTree:
-            fileName, _ = QFileDialog.getSaveFileName(self.window, "Save Multiple Animation Files", "",
-                                                      "Animation File (AnimData.xml, *.xml)")
+            options = QFileDialog.Options()
+            options |= QFileDialog.ShowDirsOnly
 
-            if fileName:
-                self._exportMultipleSheets(fileName)
+            directory = QFileDialog.getExistingDirectory(self.window, "Select Directory for Multi-Sheets", "", options)
+
+            if directory:
+                self._exportMultipleSheets(directory)
 
     def _exportMultipleSheets(self, filePath: str):
         if not self.loadedTree:
             return
-
-        dirName = os.path.dirname(filePath)
-
-        existingRoot = self.loadedTree.getroot()
 
         baseFrame = self.imageGrid[0]
         frameWidth, frameHeight = baseFrame.width, baseFrame.height
@@ -2016,10 +2018,10 @@ class AnimationEditor:
 
         # Use PIL For image operations as it's faster than directly accessing bytes.
         sheetPilImage = Image.frombytes('RGBA', (self.sheetImage.width, self.sheetImage.height),
-                                   self.sheetImage.get_image_data().get_data('RGBA'))
+                                   self.sheetImage.get_image_data().get_data('RGBA', self.sheetImage.width * 4))
 
         actionPilImage = Image.frombytes('RGBA', (self.actionPtImage.width, self.sheetImage.height),
-                                   self.actionPtImage.get_image_data().get_data('RGBA'))
+                                   self.actionPtImage.get_image_data().get_data('RGBA', self.sheetImage.width * 4))
 
         shadowPilImage = Image.frombytes('RGBA', (self.shadowImage.width, self.shadowImage.height),
                                     self.shadowImage.get_image_data().get_data('RGBA'))
@@ -2039,6 +2041,10 @@ class AnimationEditor:
 
             frameBox = originalFrame.getbbox()
             actionBox = oActionFrame.getbbox()
+
+            if not frameBox and not actionBox:
+                continue
+
             bounds = TLRectangle.fromBounds(frameBox)
             actionBounds = TLRectangle.fromBounds(actionBox)
 
@@ -2126,17 +2132,15 @@ class AnimationEditor:
                         frameBounds = Rectangle(-frameBounds.right + frameWidth, frameBounds.y, frameBounds.width, frameBounds.height)
                         actionBound = actionBound.getFlip()
 
-                    translatedRect = center_and_apply_offset(maxWidth, maxHeight,
-                                                              frameBounds, frame.flip,
-                                                              frame.spriteOffset)
+                    translatedRect = centerAndApplyOffset(maxWidth, maxHeight,
+                                                          frameBounds, frame.flip,
+                                                          frame.spriteOffset)
 
                     startX = (frameIdx * maxWidth)
 
                     newAnimImage.paste(croppedImg,
                                       (startX + int(translatedRect[0]), startY + int(translatedRect[1]))
                                       )
-
-                    #print("TESTING", frame.frameIndex, actionBound, translatedActionPt, (startX + int(translatedActionPt[0]), startY + int(translatedActionPt[1])))
 
                     actPtX = (maxWidth // 2) + frame.spriteOffset.x + actionBound.x
                     actPtY = (maxHeight // 2) + frame.spriteOffset.y + actionBound.y
@@ -2153,11 +2157,13 @@ class AnimationEditor:
                 if collapsed:
                     break
 
-            newAnimImage.save(f"{dirName}/{animGroup.name}-Anim.png")
-            newActionPtImage.save(f"{dirName}/{animGroup.name}-Offsets.png")
-            newShadowImage.save(f"{dirName}/{animGroup.name}-Shadows.png")
+            newAnimImage.save(f"{filePath}/{animGroup.name}-Anim.png")
+            newActionPtImage.save(f"{filePath}/{animGroup.name}-Offsets.png")
+            newShadowImage.save(f"{filePath}/{animGroup.name}-Shadow.png")
 
-        self._saveExportFrameData(filePath, groupSizes)
+        self._saveExportFrameData(f"{filePath}/AnimData.xml", groupSizes)
+
+        self.ui.statusBar.showMessage("Multisheet frames were output successfully.", 3000)
 
     def getAttachmentPointsFromTexture(self, path):
         if os.path.join(path, 'Offsets.png'):

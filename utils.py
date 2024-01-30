@@ -96,16 +96,14 @@ class Camera:
 def checkDuplicateImages(images: List, bodyCheck=True):
     uniqueImages = []
     uniqueBodyPoints = []
-    frames = []
+    cachedRGB = []
     imagesToFrames = {}
-    oldIdxToNewIdx = {}
     testing = {}
 
     for imgIdx, (image, bodyPoints) in enumerate(images):
-        #imgData = image.get_image_data().get_data()
-        flipped = image.transpose(Image.FLIP_LEFT_RIGHT)
+        convert = image.convert('RGB')  # Convert to RGB or comparisons won't work.
+        flipped = convert.transpose(Image.FLIP_LEFT_RIGHT)
         oddWidth = image.width % 2 == 1
-        #print("imgIdx", imgIdx, oddWidth)
 
         dupe = False
         # Check if the image is a duplicate of our unique ones, if not, it will be unique.
@@ -113,8 +111,7 @@ def checkDuplicateImages(images: List, bodyCheck=True):
             # Quick check for sizes.
 
             if image.width == compareImage.width and image.height == compareImage.height:
-                #print("found another", imgIdx, compareIdx, testing[compareIdx])
-                diff = ImageChops.difference(image, compareImage)
+                diff = ImageChops.difference(convert, cachedRGB[compareIdx])
                 if diff.getbbox() is None and (bodyCheck is False or uniqueBodyPoints[compareIdx].equals(bodyPoints, False, oddWidth)):
                     # It's a duplicate.
                     #print("duplicate")
@@ -124,7 +121,7 @@ def checkDuplicateImages(images: List, bodyCheck=True):
                     dupe = True
                     break
 
-                diff = ImageChops.difference(flipped, compareImage)
+                diff = ImageChops.difference(flipped, cachedRGB[compareIdx])
                 if diff.getbbox() is None and (bodyCheck is False or uniqueBodyPoints[compareIdx].equals(bodyPoints, True, oddWidth)):
                     #print("I found a flip!")
                     aniFrame = AnimFrame()
@@ -137,27 +134,22 @@ def checkDuplicateImages(images: List, bodyCheck=True):
         if not dupe:
             aniFrame = AnimFrame()
             aniFrame.frameIndex = len(uniqueImages)
-            #cachedData.append(imgData)
             uniqueImages.append(image)
+            cachedRGB.append(convert)
             uniqueBodyPoints.append(bodyPoints)
-            oldIdxToNewIdx[imgIdx] = aniFrame.frameIndex
             testing[aniFrame.frameIndex] = imgIdx
             imagesToFrames[imgIdx] = aniFrame
 
-    #print("original", len(images))
-    #print("Unique images:", len(uniqueImages))
-    #print("Unique Frames:, frames.)
-
-    return uniqueImages, imagesToFrames, uniqueBodyPoints, oldIdxToNewIdx
+    return uniqueImages, imagesToFrames, uniqueBodyPoints
 
 
-def roundUpToMult(in_int, in_mult) -> int:
-    sub_int = in_int - 1
-    div = sub_int // in_mult  # Use integer division (//) in Python
-    return (div + 1) * in_mult
+def roundUpToMult(inInt: int, inMult: int) -> int:
+    sub_int = inInt - 1
+    div = sub_int // inMult  # Use integer division (//) in Python
+    return (div + 1) * inMult
 
 
-def center_and_apply_offset(frame_width, frame_height, rectangle, flipped, offset):
+def centerAndApplyOffset(frame_width, frame_height, rectangle, flipped, offset):
     # Calculate the center of the frame
     center_x = frame_width // 2
     center_y = frame_height // 2
@@ -165,11 +157,11 @@ def center_and_apply_offset(frame_width, frame_height, rectangle, flipped, offse
     # Calculate the center of the rectangle
     rect_center_x = rectangle.width / 2
 
-    # # Values do not seem to be correct when flipped.
-    # if flipped:
-    #     rect_center_x = math.ceil(rect_center_x)
-    # else:
-    #     rect_center_x = int(rect_center_x)
+    # Values do not seem to be correct when flipped.
+    if flipped:
+        rect_center_x = math.ceil(rect_center_x)
+    else:
+        rect_center_x = int(rect_center_x)
 
     rect_center_y = rectangle.height // 2
 
@@ -178,94 +170,6 @@ def center_and_apply_offset(frame_width, frame_height, rectangle, flipped, offse
     new_y = center_y - rect_center_y + offset.y
 
     return int(new_x), int(new_y)
-
-
-def flip_image_x_axis(image):
-    data = image.get_image_data().get_data()
-
-    width, height = image.width, image.height
-
-    flipped_image_data = bytearray(len(data))  # Create a new bytearray to store the flipped image data
-
-    for y in range(height):
-        for x in range(width):
-            # Calculate the source and destination pixel indices
-            src_pixel_start = (y * width + x) * 4  # Source pixel start index
-            dest_pixel_start = (y * width + (width - 1 - x)) * 4  # Destination pixel start index for x-axis flip
-
-            # Copy the RGBA values from the source to the destination
-            flipped_image_data[dest_pixel_start:dest_pixel_start + 4] = data[src_pixel_start:src_pixel_start + 4]
-
-    return pyglet.image.ImageData(width, height, image.format, bytes(flipped_image_data))
-
-
-def flip_image_data(image):
-    data = image.get_image_data().get_data()
-
-    width, height = image.width, image.height
-
-    flipped_image_data = bytearray(len(data))  # Create a new bytearray to store the flipped image data
-
-    for y in range(height):
-        for x in range(width):
-            # Calculate the source and destination pixel indices
-            src_pixel_start = (y * width + x) * 4  # Source pixel start index
-            dest_pixel_start = (y * width + (width - 1 - x)) * 4  # Destination pixel start index for x-axis flip
-
-            # Copy the RGBA values from the source to the destination
-            flipped_image_data[dest_pixel_start:dest_pixel_start + 4] = data[src_pixel_start:src_pixel_start + 4]
-
-    return bytes(flipped_image_data)
-
-
-def findPixelBounds(image):
-    data = image.get_image_data().get_data()
-
-    width, height = image.width, image.height
-
-    leftmost = None
-    topmost = None
-    rightmost = None
-    bottommost = None
-
-    for y in range(height):
-        for x in range(width):
-            pixel_start = (y * width + x) * 4  # Each pixel is represented by 4 bytes (RGBA)
-            alpha = data[pixel_start + 3]
-
-            if alpha != 0:  # Check if the alpha channel is not transparent
-                if leftmost is None or x < leftmost:
-                    leftmost = x
-                if rightmost is None or x > rightmost:
-                    rightmost = x
-                if topmost is None or y > topmost:
-                    topmost = y
-                if bottommost is None or y < bottommost:
-                    bottommost = y
-
-    if leftmost is None or topmost is None or rightmost is None or bottommost is None:
-        return None
-
-    return Rectangle(leftmost, bottommost, rightmost - leftmost + 1, topmost - bottommost + 1)
-
-
-def getShadowLocationFromImage(image) -> Offset | None:
-    data = image.get_image_data().get_data()
-
-    width, height = image.width, image.height
-
-    for y in range(height):
-        for x in range(width):
-            pixel_start = (y * width + x) * 4  # Each pixel is represented by 4 bytes (RGBA)
-            alpha = data[pixel_start + 3]
-
-            if alpha != 0:  # Check if the alpha channel is not transparent
-                pixel = data[pixel_start:pixel_start+3]
-                if pixel == b'\xff\xff\xff':  # white
-                    # White is shadow, abandon once we find one..
-                    return Offset(x, y)
-
-    return None
 
 
 def getActionPointsFromImage(image: pyglet.image.ImageDataRegion) -> Tuple[None | Offset, None | Offset, None | Offset,

@@ -1566,6 +1566,8 @@ class AnimationEditor:
 
             if self.animating:
                 pyglet.clock.schedule_once(self._playingAnimation, self.animSpeed * self.currentAnimFrame.duration)
+            else:
+                self.sliderChange()
 
     def setAnimation(self):
         self.openGLWidget.makeCurrent()

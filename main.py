@@ -1549,13 +1549,15 @@ class AnimationEditor:
 
         self.ui.frameSlider.setValue(self.currentAnimFrame.idx)
 
+        existingFrame = self.currentAnimFrame
+
         nextFrame = self.currentAnimFrame.idx + 1
         if nextFrame > len(self.currentSequence.frames) - 1:
             nextFrame = 0
 
         self.currentAnimFrame = self.currentSequence.frames[nextFrame]
 
-        pyglet.clock.schedule_once(self._playingAnimation, self.animSpeed * self.currentAnimFrame.duration)
+        pyglet.clock.schedule_once(self._playingAnimation, self.animSpeed * existingFrame.duration)
 
     def playAnimation(self):
         if self.currentAnimFrame:
@@ -1780,7 +1782,6 @@ class AnimationEditor:
                         actionPoints = ActionPoints(leftHand, center, rightHand, head)
                     elif actionPointLoc[0] or actionPointLoc[1] or actionPointLoc[2] or actionPointLoc[3]:
                         return self.createErrorPopup("Error decoding action points.")
-
 
                     # Position relative to 0, 0.
                     actionPoints.add(Offset(-croppedFrame.x - frameCenter[0], -croppedFrame.y - frameCenter[1]))

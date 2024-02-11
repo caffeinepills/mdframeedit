@@ -2,7 +2,7 @@ import math
 from typing import List, Tuple
 
 import pyglet
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageDraw
 
 from data import AnimFrame, Rectangle, Offset
 
@@ -255,3 +255,16 @@ def getActionPointsFromPILImage(image) -> Tuple[None | Offset, None | Offset, No
                     b = Offset(x, y)
 
     return r, g, b, black
+
+def createPlusImage(size: int, color: tuple):
+    # Create a new image with a white background
+    dimensions = (size, size)
+    image = Image.new('RGBA', dimensions, (0, 0, 0, 0))
+
+    draw = ImageDraw.Draw(image)
+
+    center = (size // 2, size // 2)
+    draw.line([(center[0] - 2, center[1]), (center[0] + 2, center[1])], fill=color, width=1)
+    draw.line([(center[0], center[1] - 2), (center[0], center[1] + 2)], fill=color, width=1)
+
+    return pyglet.image.ImageData(image.width, image.height, 'RGBA', image.tobytes())

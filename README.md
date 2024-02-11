@@ -1,19 +1,31 @@
-Simple frame editor to edit FrameData.xml and see results live instead of manually editing XML data and importing into your game.
+Frame editor to edit FrameData.xml/AnimData.xml sheets and see results live instead of manually editing XML data and importing into your game.
 
-Notes:
-For an easier time, copy an existing FrameData.xml to use and modify. Also make sure the FrameWidth, FrameHeight XML datas are accurate for the sheet you are using.
+**Note:**
+For an easier time, use existing FrameData or AnimData to use and modify. Also make sure the FrameWidth, FrameHeight XML datas are accurate for the sheet you are using.
 
-Save Options:
+### Controls
+* **O** - Toggle Offset Display (Action Points), if loaded.
+* **S** - Toggle Shadow Display.
+* **Mouse Scroll** - Zoom in and Out of Preview
+* **Hold Ctrl + Mouse Scroll** - Adjust opacity of loaded sprite.
 
-Trim Copies: Instead of writing full animation data, will instead write an Animation Action as CopyOf data. If your program doesn't handle this scenario, leave unchecked to write all frame data.
+### Save Options
 
-Collapse Singles: If there is only one sequence that is the same for all 8 directions, it will save it as 1 sequence. If your program doesn't handle this scenario, leave unchecked to write all 8 sequences.
+**Trim Copies**: Instead of writing full animation data, will instead write an Animation Action as CopyOf data. If your program doesn't handle this scenario, leave unchecked to write all frame data.
 
-If you want to build yourself, you can do so via Pyinstaller: pyinstaller MDFrameEditor.spec
+**Collapse Singles**: If there is only one sequence that is the same for all 8 directions, it will save it as 1 sequence. If your program doesn't handle this scenario, leave unchecked to write all 8 sequences.
 
-Download for a Windows version is provided
+### Building
+
+If you want to build yourself, you can do so via Pyinstaller: `pyinstaller MDFrameEditor.spec`
+
+Download for a Windows version is provided. Untested on Linux and Mac, although it should build and work there.
 
 ----
+1.4:
+* Add: Offsets (Action Point) preview markers. Use O to toggle on or off. (Only works if offsets were loaded.)
+* Add: Toggle Shadows option.
+* Change: Pausing an animation will now set the frame data of the frame it paused on.
 
 1.3:
 * Add: You can now load multi-sheet images and data.
@@ -35,12 +47,13 @@ Download for a Windows version is provided
 1.0:
 * Initial Release
 
-Known Issue
-* False virus notification. Due to PyInstaller (the packaging utility) being used by people to package malicious 
- programs, many anti-virus programs may flag the program. Add an exception to the directory you will keep the program at.
- 
-  https://support.microsoft.com/en-us/windows/add-an-exclusion-to-windows-security-811816c0-4dfd-af4a-47e4-c301afe13b26
-* If you don't trust the release versions, you can download the source and package it into an executable yourself.
+### Known Issues
+* **False virus notification**: Due to PyInstaller (the packaging utility) being used by people to package malicious 
+ programs, many anti-virus programs may flag this packaged program. To get around this you will have to add an exception with your antivirus to the directory you will keep the program at.
+ [Click here for an article on adding exceptions for Microsoft Defender](https://support.microsoft.com/en-us/windows/add-an-exclusion-to-windows-security-811816c0-4dfd-af4a-47e4-c301afe13b26)
+
+If you don't trust the release versions, you can download the source and package it into an executable yourself with pyinstaller:
+`pyinstaller MDFrameEditor.spec`
 
 
 ![img.png](img.png)

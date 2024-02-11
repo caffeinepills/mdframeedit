@@ -2,7 +2,7 @@ from dataclasses import field, dataclass
 from enum import Enum
 from typing import List
 
-VERSION = "1.3"
+VERSION = "1.4"
 
 RIGHT = 6
 UP_RIGHT = 5
@@ -261,9 +261,15 @@ class ActionPoints:
     def rightHandFlip(self):
         return self._flip(self.rightHand)
 
+    def allPos(self):
+        return self.leftHand, self.center, self.rightHand, self.head
+
+    def allFlipPos(self):
+        return self.leftHandFlip, self.centerFlip, self.rightHandFlip, self.headFlip
+
     def add(self, offset: Offset):
-        self.center += offset
         self.leftHand += offset
+        self.center += offset
         self.rightHand += offset
         self.head += offset
 

@@ -18,7 +18,7 @@ sys.coinit_flags = 2
 
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtCore import QSettings, QFileInfo
-from PyQt5.QtGui import QWheelEvent, QPixmap, QImage
+from PyQt5.QtGui import QWheelEvent, QPixmap, QImage, QKeyEvent
 from PyQt5.QtWidgets import QFileDialog, QListWidgetItem, QInputDialog
 from pyglet.gl import *
 from pyglet.math import clamp
@@ -27,7 +27,8 @@ from data import *
 from gui.batchadd import Ui_BatchCreateAction
 from gui.editor import Ui_MainWindow
 from utils import (TopLeftGrid, Camera, checkDuplicateImages, roundUpToMult, centerAndApplyOffset,
-                   getActionPointsFromImage, getActionPointsFromPILImage, getShadowLocationFromPILImage)
+                   getActionPointsFromImage, getActionPointsFromPILImage, getShadowLocationFromPILImage,
+                   createPlusImage)
 
 pyglet.image.Texture.default_min_filter = GL_NEAREST
 pyglet.image.Texture.default_mag_filter = GL_NEAREST
@@ -179,6 +180,18 @@ class PygletWidget(QtWidgets.QOpenGLWidget):
         self.camera = Camera(self, self.focusPoint)
 
         self.elapsed = 0
+
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+
+    def keyPressEvent(self, event: QKeyEvent):
+        super().keyPressEvent(event)
+
+        if event.key() == QtCore.Qt.Key_O:
+            for sprite in self.editor.apSprites:
+                sprite.visible = not sprite.visible
+        elif event.key() == QtCore.Qt.Key_S:
+            if self.editor.shadow:
+                self.editor.shadow.visible = not self.editor.shadow.visible
 
     def wheelEvent(self, event: QWheelEvent):
         super().wheelEvent(event)
@@ -465,6 +478,17 @@ class AnimationEditor:
 
         self.sprite = None
         self.shadow: Optional[pyglet.sprite.Sprite] = None
+
+        self.markerSize = 3
+        self.actionPointMarker = createPlusImage(self.markerSize, (255, 255, 255, 255))
+        self.actionPointMarker.anchor_x = self.markerSize // 2
+        self.actionPointMarker.anchor_y = self.markerSize // 2
+        self.leftHand: Optional[pyglet.sprite.Sprite] = None
+        self.center: Optional[pyglet.sprite.Sprite] = None
+        self.rightHand: Optional[pyglet.sprite.Sprite] = None
+        self.head: Optional[pyglet.sprite.Sprite] = None
+
+        self.apSprites = []
 
         self.currentDirection = 0
         self.animating = False
@@ -1361,6 +1385,7 @@ class AnimationEditor:
                                      rows=self.sheetImage.height // height,
                                      columns=self.sheetImage.width // width)
 
+            actionCenter = self.actionGrid[0].width // 2, self.actionGrid[0].height // 2
             for idx, actImg in enumerate(self.actionGrid):
                 actImg: pyglet.image.ImageDataRegion
                 actionPointLoc = getActionPointsFromImage(actImg)
@@ -1373,7 +1398,12 @@ class AnimationEditor:
 
                     leftHand = actionPointLoc[0]
                     rightHand = actionPointLoc[2]
+
                     self.actionPoints[idx] = ActionPoints(leftHand, center, rightHand, head)
+
+                    # Position relative to 0, 0.
+                    self.actionPoints[idx].add(Offset(-actionCenter[0], -actionCenter[1]))
+
 
                 else:
                     self.actionGrid = None
@@ -1542,6 +1572,27 @@ class AnimationEditor:
         return ((self.openGLWidget.width() // 2) + (self.currentAnimFrame.shadowOffset.x * self.scale),
                 (self.openGLWidget.height() // 3) + (-self.currentAnimFrame.shadowOffset.y * self.scale), 0)
 
+    def getActionPointPositions(self):
+        ap = self.actionPoints[self.currentAnimFrame.frameIndex]
+
+        if not self.currentAnimFrame.flip:
+            lhPos, cPos, rhPos, headPos = ap.allPos()
+        else:
+            lhPos, cPos, rhPos, headPos = ap.allFlipPos()
+
+        lh = ((self.openGLWidget.width() // 2) + ((self.currentAnimFrame.spriteOffset.x + lhPos.x) * self.scale),
+                (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y + lhPos.y) * self.scale), 0)
+
+        cent = ((self.openGLWidget.width() // 2) + ((self.currentAnimFrame.spriteOffset.x + cPos.x) * self.scale),
+                (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y + cPos.y) * self.scale), 0)
+
+        rh = ((self.openGLWidget.width() // 2) + ((self.currentAnimFrame.spriteOffset.x + rhPos.x) * self.scale),
+                (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y + rhPos.y) * self.scale), 0)
+
+        head = ((self.openGLWidget.width() // 2) + ((self.currentAnimFrame.spriteOffset.x + headPos.x) * self.scale),
+                (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y + headPos.y) * self.scale), 0)
+        return lh, cent, rh, head
+
     def _playingAnimation(self, dt):
         self.openGLWidget.makeCurrent()
 
@@ -1577,6 +1628,7 @@ class AnimationEditor:
                 if not self.sprite:
                     spritePos = self.getSpritePosition()
                     shadowPos = self.getShadowPosition()
+
                     firstIdx = self.currentAnimGroup.directions[self.currentDirection].frames[0].frameIndex
 
                     self.shadow = pyglet.sprite.Sprite(self.shadowImage, x=shadowPos[0], y=shadowPos[1],
@@ -1588,7 +1640,35 @@ class AnimationEditor:
                     self.sprite.scale = self.scale
 
 
-                else:
+                if not self.leftHand:
+                    if self.actionPoints:
+                        lhPos, centPos, rhPos, headPos = self.getActionPointPositions()
+
+                        self.leftHand = pyglet.sprite.Sprite(self.actionPointMarker, x=lhPos[0], y=lhPos[1],
+                                                           batch=self.openGLWidget.batch, group=pyglet.graphics.Group(2))
+                        self.leftHand.color = (255, 0, 0)
+                        self.leftHand.scale = self.scale
+
+                        self.center = pyglet.sprite.Sprite(self.actionPointMarker, x=centPos[0], y=centPos[1],
+                                                           batch=self.openGLWidget.batch, group=pyglet.graphics.Group(3))
+                        self.center.color = (0, 255, 0)
+                        self.center.scale = self.scale
+
+                        self.rightHand =pyglet.sprite.Sprite(self.actionPointMarker, x=rhPos[0], y=rhPos[1],
+                                                           batch=self.openGLWidget.batch, group=pyglet.graphics.Group(2))
+                        self.rightHand.color = (0, 0, 255)
+                        self.rightHand.scale = self.scale
+
+                        self.head = pyglet.sprite.Sprite(self.actionPointMarker, x=headPos[0], y=headPos[1],
+                                                           batch=self.openGLWidget.batch, group=pyglet.graphics.Group(2))
+                        self.head.color = (0, 0, 0)
+                        self.head.scale = self.scale
+
+                        self.apSprites = [self.leftHand, self.center, self.rightHand, self.head]
+                        for sprite in self.apSprites: # Start them off as invisible.
+                            sprite.visible = False
+
+                if self.sprite:
                     animFrame = self.currentAnimFrame if self.currentAnimFrame is not None else \
                         self.currentAnimGroup.directions[self.currentDirection].frames[0]
 
@@ -1603,8 +1683,16 @@ class AnimationEditor:
                 image.anchor_y = image.height // 2
 
             self.sprite.image = image
+
             self.sprite.position = self.getSpritePosition()
             self.shadow.position = self.getShadowPosition()
+
+            if self.leftHand:
+                lhPos, centPos, rhPos, headPos = self.getActionPointPositions()
+                self.leftHand.position = lhPos
+                self.center.position = centPos
+                self.rightHand.position = rhPos
+                self.head.position = headPos
 
     def importMultipleSheets(self, fileName):
         dirName = os.path.dirname(fileName)

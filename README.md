@@ -26,7 +26,9 @@ Download for a Windows version is provided. Untested on Linux and Mac, although 
 * Add: Offsets (Action Point) preview markers. Use O to toggle on or off. (Only works if offsets were loaded.)
 * Add: Toggle Shadows option.
 * Change: Pausing an animation will now set the frame data of the frame it paused on.
-
+* Change: Ignore extra empty frames if action points were loaded.
+* Fix: Shadow positions being off by 1 when importing multi and exporting single.
+* 
 1.3:
 * Add: You can now load multi-sheet images and data.
 * Add: You can now export new multi-sheets and single sheets.

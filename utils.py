@@ -1,10 +1,10 @@
 import math
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 import pyglet
 from PIL import Image, ImageChops, ImageDraw
 
-from data import AnimFrame, Rectangle, Offset
+from data import AnimFrame, Offset
 
 
 class TopLeftTextureGrid(pyglet.image.TextureGrid):
@@ -203,14 +203,16 @@ def getActionPointsFromImage(image: pyglet.image.ImageDataRegion) -> Tuple[None 
 
             if alpha != 0:  # Check if the alpha channel is not transparent
                 pixel = data[pixel_start:pixel_start+3]
+                if pixel == b'\xff\xff\xff': # skip white.
+                    continue
                 if pixel == b'\x00\x00\x00':  # black
-                    black = Offset(x, y)
+                    black = Offset(x, height - y)
                 if pixel[ridx] == 255:  # red
-                    r = Offset(x, y)
+                    r = Offset(x, height - y)
                 if pixel[gidx] == 255:  # green
-                    g = Offset(x, y)
+                    g = Offset(x, height - y)
                 if pixel[bidx] == 255:  # blue
-                    b = Offset(x, y)
+                    b = Offset(x, height - y)
 
     return r, g, b, black
 
@@ -225,7 +227,7 @@ def getShadowLocationFromPILImage(image) -> Offset | None:
             if pixel[3] != 0:  # Check if the alpha channel is not transparent
                 if pixel == (255, 255, 255, 255):  # white
                     # White is shadow, abandon once we find one..
-                    return Offset(x, y)
+                    return Offset(x, y + 1)
 
     return None
 
@@ -246,17 +248,18 @@ def getActionPointsFromPILImage(image) -> Tuple[None | Offset, None | Offset, No
 
             if pixel[3] != 0:  # Check if the alpha channel is not transparent
                 if pixel == (0, 0, 0, 255):  # black
-                    black = Offset(x, y)
+                    black = Offset(x, y + 1)
                 if pixel[0] == 255:  # red
-                    r = Offset(x, y)
+                    r = Offset(x, y + 1)
                 if pixel[1] == 255:  # green
-                    g = Offset(x, y)
+                    g = Offset(x, y + 1)
                 if pixel[2] == 255:  # blue
-                    b = Offset(x, y)
+                    b = Offset(x, y + 1)
+
 
     return r, g, b, black
 
-def createPlusImage(size: int, color: tuple):
+def createPlusImage(size: int, color: Tuple):
     # Create a new image with a white background
     dimensions = (size, size)
     image = Image.new('RGBA', dimensions, (0, 0, 0, 0))
@@ -268,3 +271,16 @@ def createPlusImage(size: int, color: tuple):
     draw.line([(center[0], center[1] - 2), (center[0], center[1] + 2)], fill=color, width=1)
 
     return pyglet.image.ImageData(image.width, image.height, 'RGBA', image.tobytes())
+
+def overlapColors(positions: Dict):
+    combinedPositions = {}
+
+    # Iterate over the positions to check for overlaps and combine colors
+    for pos, colors in positions.items():
+        combinedColor = [0, 0, 0, 0]
+        for color in colors:
+            # Combine colors, taking the maximum value for each channel
+            combinedColor = [max(c1, c2) for c1, c2 in zip(combinedColor, color)]
+        combinedPositions[pos] = tuple(combinedColor)
+
+    return combinedPositions

@@ -108,6 +108,9 @@ class Offset:
     def invertY(self):
         return Offset(self.x, -self.y)
 
+    def data(self):
+        return self.x, self.y
+
 
 @dataclass
 class AnimFrame:
@@ -213,6 +216,13 @@ class TLRectangle:
     def values(self):
         return self.x, self.y, self.width, self.height
 
+    def bounds(self):
+        return self.left, self.top, self.right, self.bottom
+
+    @property
+    def center(self):
+        return self.x + self.width // 2, self.y + self.height // 2
+
     def __add__(self, other):
         if isinstance(other, tuple):
             return TLRectangle(self.x + other[0], self.y + other[1], self.width, self.height)
@@ -260,6 +270,13 @@ class ActionPoints:
     @property
     def rightHandFlip(self):
         return self._flip(self.rightHand)
+
+    def empty(self):
+        if (self.leftHand.x == 0 and self.leftHand.y == 0 and self.rightHand.x == 0 and self.rightHand.y == 0 and
+                self.head.x == 0 and self.head.y == 0 and self.center.x == 0 and self.center.y == 0):
+            return True
+
+        return False
 
     def allPos(self):
         return self.leftHand, self.center, self.rightHand, self.head

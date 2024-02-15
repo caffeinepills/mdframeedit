@@ -5,6 +5,7 @@ import os
 import sys
 import traceback
 import xml.etree.ElementTree as ElementTree
+from collections import defaultdict
 from functools import partial
 from typing import Optional, Tuple, Set
 import pyglet
@@ -28,7 +29,7 @@ from gui.batchadd import Ui_BatchCreateAction
 from gui.editor import Ui_MainWindow
 from utils import (TopLeftGrid, Camera, checkDuplicateImages, roundUpToMult, centerAndApplyOffset,
                    getActionPointsFromImage, getActionPointsFromPILImage, getShadowLocationFromPILImage,
-                   createPlusImage)
+                   createPlusImage, overlapColors)
 
 pyglet.image.Texture.default_min_filter = GL_NEAREST
 pyglet.image.Texture.default_mag_filter = GL_NEAREST
@@ -479,7 +480,7 @@ class AnimationEditor:
         self.sprite = None
         self.shadow: Optional[pyglet.sprite.Sprite] = None
 
-        self.markerSize = 3
+        self.markerSize = 5
         self.actionPointMarker = createPlusImage(self.markerSize, (255, 255, 255, 255))
         self.actionPointMarker.anchor_x = self.markerSize // 2
         self.actionPointMarker.anchor_y = self.markerSize // 2
@@ -1346,6 +1347,9 @@ class AnimationEditor:
             image: pyglet.image.ImageDataRegion
             image.anchor_x = image.width // 2
             image.anchor_y = image.height // 2
+            if self.actionPoints:
+                if idx not in self.actionPoints:
+                    continue
             item = LoadedSheetFrame(f"Frame {idx}", idx, image, self.ui.sheetFramePicture, self)
             self.ui.loadedSheetFrameList.addItem(item)
 
@@ -1451,7 +1455,10 @@ class AnimationEditor:
                                     shadowOffset = Offset(*[int(offset.text) for offset in frame])
 
                                 elif frame.tag == "HFlip":
-                                    hflip = int(frame.text)
+                                    try:
+                                        hflip = int(frame.text)
+                                    except ValueError:
+                                        hflip = int(bool(frame.text))
 
                                 elif frame.tag == "Duration":
                                     duration = int(frame.text)
@@ -1542,6 +1549,7 @@ class AnimationEditor:
         self.actionPtImage = None
         self.imageGrid: Optional[TopLeftGrid] = None
         self.actionGrid: Optional[TopLeftGrid] = None
+        self.actionPoints.clear()
         self.groups.clear()
 
         pyglet.clock.unschedule(self._playingAnimation)
@@ -1581,16 +1589,16 @@ class AnimationEditor:
             lhPos, cPos, rhPos, headPos = ap.allFlipPos()
 
         lh = ((self.openGLWidget.width() // 2) + ((self.currentAnimFrame.spriteOffset.x + lhPos.x) * self.scale),
-                (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y + lhPos.y) * self.scale), 0)
+                (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y - lhPos.y) * self.scale), 0)
 
         cent = ((self.openGLWidget.width() // 2) + ((self.currentAnimFrame.spriteOffset.x + cPos.x) * self.scale),
-                (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y + cPos.y) * self.scale), 0)
+                (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y - cPos.y) * self.scale), 0)
 
         rh = ((self.openGLWidget.width() // 2) + ((self.currentAnimFrame.spriteOffset.x + rhPos.x) * self.scale),
-                (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y + rhPos.y) * self.scale), 0)
+                (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y - rhPos.y) * self.scale), 0)
 
         head = ((self.openGLWidget.width() // 2) + ((self.currentAnimFrame.spriteOffset.x + headPos.x) * self.scale),
-                (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y + headPos.y) * self.scale), 0)
+                (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y - headPos.y) * self.scale), 0)
         return lh, cent, rh, head
 
     def _playingAnimation(self, dt):
@@ -1840,15 +1848,14 @@ class AnimationEditor:
 
                     frameImg = animImage.crop(obounds)
 
-                    #frameImg = grid[(sequenceIdx, frameIdx)]
-
                     oFrameBox = frameImg.getbbox()
                     if oFrameBox:
                         croppedFrame = TLRectangle.fromBounds(oFrameBox)
                     else:
                         # No bounds found, it's possible the frame is empty. For example, an animation may temporarily
-                        # make a character disappear/reappear. Create a frame at the center.
+                        # make a character disappear/reappear. Create a frame at the center that's 1x1.
                         croppedFrame = TLRectangle(frameWidth // 2, frameHeight // 2, 1, 1)
+                        oFrameBox = croppedFrame.bounds()
 
                     maxWidth = max(maxWidth, croppedFrame.width)
                     maxHeight = max(maxHeight, croppedFrame.height)
@@ -1857,9 +1864,12 @@ class AnimationEditor:
 
                     actionPointLoc = getActionPointsFromPILImage(actionPointFrame)
 
-                    frameCenter = croppedFrame.width // 2, croppedFrame.height // 2
+                    boundsCenter = croppedFrame.center
 
-                    actionPoints = ActionPoints(Offset(*frameCenter), Offset(*frameCenter), Offset(*frameCenter), Offset(*frameCenter))
+                    actionPoints = ActionPoints(Offset(*boundsCenter),
+                                                Offset(*boundsCenter),
+                                                Offset(*boundsCenter),
+                                                Offset(*boundsCenter))
 
                     if actionPointLoc[0] and actionPointLoc[1] and actionPointLoc[2]:
                         center = actionPointLoc[1]
@@ -1871,10 +1881,10 @@ class AnimationEditor:
                         rightHand = actionPointLoc[2]
                         actionPoints = ActionPoints(leftHand, center, rightHand, head)
                     elif actionPointLoc[0] or actionPointLoc[1] or actionPointLoc[2] or actionPointLoc[3]:
-                        return self.createErrorPopup("Error decoding action points.")
+                        return self.createErrorPopup(f"Error decoding action points from offsets image. Frame Index: {frameIdx}")
 
                     # Position relative to 0, 0.
-                    actionPoints.add(Offset(-croppedFrame.x - frameCenter[0], -croppedFrame.y - frameCenter[1]))
+                    actionPoints.add(Offset(-boundsCenter[0], -boundsCenter[1]))
 
                     offsetRect = actionPoints.getRect()
                     cOffsetRect = centerBounds(offsetRect)
@@ -1940,15 +1950,21 @@ class AnimationEditor:
             startOffset = Offset(bpStartX, bpStartY)
 
             bp = uniqueBodyPoints[frameIdx]
-            lh = startOffset + bp.leftHand
-            center  = startOffset + bp.center
-            rh = startOffset + bp.rightHand
-            head = startOffset + bp.head
+            lh = (startOffset + bp.leftHand).data()
+            center  = (startOffset + bp.center).data()
+            rh = (startOffset + bp.rightHand).data()
+            head = (startOffset + bp.head).data()
 
-            apDraw.point((lh.x, lh.y), fill=(255, 0, 0, 255))
-            apDraw.point((center.x, center.y), fill=(0, 255, 0, 255))
-            apDraw.point((rh.x, rh.y), fill=(0, 0, 255, 255))
-            apDraw.point((head.x, head.y ), fill=(0, 0, 0, 255))
+            positions = defaultdict(list)
+            positions[lh].append((255, 0, 0, 255))
+            positions[center].append((0, 255, 0, 255))
+            positions[head].append((90, 0, 0, 255))
+            positions[rh].append((0, 0, 255, 255))
+
+            for pos, color in overlapColors(positions).items():
+                apDraw.point(pos, fill=color)
+
+            self.actionPoints[frameIdx] = uniqueBodyPoints[frameIdx]
 
         flippedFrames = set()
         # Now we need to go through and update the data with the correct frame indexes.
@@ -2133,8 +2149,13 @@ class AnimationEditor:
             frameBox = originalFrame.getbbox()
             actionBox = oActionFrame.getbbox()
 
-            if not frameBox and not actionBox:
-                continue
+            # No bounds. Empty frame.
+            if not frameBox:
+                # If no action box, it shouldn't be output?
+                if not actionBox:
+                    continue
+                else:
+                    frameBox = (l, t, l+1, b+1)
 
             bounds = TLRectangle.fromBounds(frameBox)
             actionBounds = TLRectangle.fromBounds(actionBox)

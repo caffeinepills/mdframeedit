@@ -22,7 +22,7 @@ If you want to build yourself, you can do so via Pyinstaller: `pyinstaller MDFra
 Download for a Windows version is provided. Untested on Linux and Mac, although it should build and work there.
 
 ----
-1.41:
+1.4.1:
 * Fix: Shadow positions when previewing and exporting.
 * Fix: Shadows being flipped when exporting.
 

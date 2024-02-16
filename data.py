@@ -2,7 +2,7 @@ from dataclasses import field, dataclass
 from enum import Enum
 from typing import List
 
-VERSION = "1.41"
+VERSION = "1.4.1"
 
 RIGHT = 6
 UP_RIGHT = 5

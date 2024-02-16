@@ -475,7 +475,7 @@ class AnimationEditor:
 
         self.shadowImage = pyglet.image.load("shadow.png")
         self.shadowImage.anchor_x = self.shadowImage.width // 2
-        self.shadowImage.anchor_y = (self.shadowImage.height // 2) + 1
+        self.shadowImage.anchor_y = self.shadowImage.height // 2
 
         self.sprite = None
         self.shadow: Optional[pyglet.sprite.Sprite] = None
@@ -1832,10 +1832,6 @@ class AnimationEditor:
             item = AnimGroupItem(group, self)
             self.ui.actionListWidget.addItem(item)
 
-            #grid = TopLeftGrid(animImage, rows=frameYCount, columns=frameXCount)
-            #offsetGrid = TopLeftGrid(offsetImage, rows=frameYCount, columns=frameXCount)
-            shadowGrid = TopLeftGrid(shadowImage, rows=frameYCount, columns=frameXCount)
-
             for i in range(sequenceCount):
                 sequenceIdx = (sequenceCount - i) % sequenceCount
 
@@ -1900,12 +1896,12 @@ class AnimationEditor:
                     animFrame.spriteOffset = Offset(offsetX, offsetY)
                     animFrame.duration = durations[frameIdx]
 
-                    if shadowGrid:
+                    if shadowImage:
                         simage = shadowImage.crop(obounds)
 
                         if shadowOffset := getShadowLocationFromPILImage(simage):
                             animFrame.shadowOffset.x = shadowOffset.x - frameWidth // 2
-                            animFrame.shadowOffset.y = shadowOffset.y  - frameHeight // 2
+                            animFrame.shadowOffset.y = shadowOffset.y - frameHeight // 2
                     else:
                         animFrame.shadowOffset.x = 0
                         animFrame.shadowOffset.y = -(croppedFrame.y - frameHeight // 2) // 2
@@ -2136,6 +2132,7 @@ class AnimationEditor:
         # FLIP due to data upside down.
         sheetPilImage = sheetPilImage.transpose(Image.FLIP_TOP_BOTTOM)
         actionPilImage = actionPilImage.transpose(Image.FLIP_TOP_BOTTOM)
+        shadowPilImage = shadowPilImage.transpose(Image.FLIP_TOP_BOTTOM)
 
         for i in range(len(self.imageGrid)):
             startX, startY = i % self.imageGrid.columns, i // self.imageGrid.columns

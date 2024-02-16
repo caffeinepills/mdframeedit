@@ -227,7 +227,7 @@ def getShadowLocationFromPILImage(image) -> Offset | None:
             if pixel[3] != 0:  # Check if the alpha channel is not transparent
                 if pixel == (255, 255, 255, 255):  # white
                     # White is shadow, abandon once we find one..
-                    return Offset(x, y + 1)
+                    return Offset(x, y)
 
     return None
 
@@ -248,13 +248,13 @@ def getActionPointsFromPILImage(image) -> Tuple[None | Offset, None | Offset, No
 
             if pixel[3] != 0:  # Check if the alpha channel is not transparent
                 if pixel == (0, 0, 0, 255):  # black
-                    black = Offset(x, y + 1)
+                    black = Offset(x, y)
                 if pixel[0] == 255:  # red
-                    r = Offset(x, y + 1)
+                    r = Offset(x, y)
                 if pixel[1] == 255:  # green
-                    g = Offset(x, y + 1)
+                    g = Offset(x, y)
                 if pixel[2] == 255:  # blue
-                    b = Offset(x, y + 1)
+                    b = Offset(x, y)
 
 
     return r, g, b, black

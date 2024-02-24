@@ -17,11 +17,17 @@ For an easier time, use existing FrameData or AnimData to use and modify. Also m
 
 ### Building
 
-If you want to build yourself, you can do so via Pyinstaller: `pyinstaller MDFrameEditor.spec`
+If you want to build yourself, you can do so via Pyinstaller: `pyinstaller MDFrameEditor.spec` or Nuitka.
 
 Download for a Windows version is provided. Untested on Linux and Mac, although it should build and work there.
 
 ----
+1.4.2:
+* Fix: Shadow saving as brown instead of black.
+* Change: Now checks for multi-sheet export eligibility before outputting frames.
+* Add: Frame information when failing to export multi-sheets due to unmatching frames.
+* Add: Warning if frames are evenly divisible when loading a single sheet.
+
 1.4.1:
 * Fix: Shadow positions when previewing and exporting.
 * Fix: Shadows being flipped when exporting.

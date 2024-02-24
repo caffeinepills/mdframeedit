@@ -2,7 +2,7 @@ from dataclasses import field, dataclass
 from enum import Enum
 from typing import List
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 
 RIGHT = 6
 UP_RIGHT = 5
@@ -14,6 +14,17 @@ DOWN = 0
 DOWN_RIGHT = 7
 
 FRAME_DATA = (DOWN, DOWN_LEFT, LEFT, UP_LEFT, UP, UP_RIGHT, RIGHT, DOWN_RIGHT)
+
+FD_STR = {
+    DOWN: "DOWN",
+    DOWN_LEFT: "DOWN LEFT",
+    LEFT: "LEFT",
+    UP_LEFT: "UP LEFT",
+    UP: "UP",
+    UP_RIGHT: "UP RIGHT",
+    RIGHT: "RIGHT",
+    DOWN_RIGHT: "DOWN RIGHT"
+}
 
 
 class LegacyAnimationActions(Enum):

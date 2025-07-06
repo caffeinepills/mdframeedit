@@ -1756,7 +1756,7 @@ class AnimationEditor:
         root = self.loadedTree.getroot()
 
         anims = root.find('Anims')
-        if not anims:
+        if anims is None:
             self.ui.statusBar.showMessage("Unable to find any Animation XML data.", 5000)
             return
 

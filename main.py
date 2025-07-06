@@ -1,4 +1,5 @@
-# -*- coding: utf-8 -*-
+from __future__ import annotations
+
 import copy
 import math
 import os
@@ -11,16 +12,17 @@ from typing import Optional, Tuple, Set, Union, Literal
 import pyglet
 from PIL import Image, ImageDraw
 
-pyglet.options["com_mta"] = False
+pyglet.options.com_mta = False
 import warnings
 
 warnings.simplefilter("ignore", UserWarning)
 sys.coinit_flags = 2
 
-from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtCore import QSettings, QFileInfo
-from PyQt5.QtGui import QWheelEvent, QPixmap, QImage, QKeyEvent
-from PyQt5.QtWidgets import QFileDialog, QListWidgetItem, QInputDialog
+from PySide6 import QtCore, QtWidgets, QtGui
+from PySide6.QtCore import QSettings, QFileInfo
+from PySide6.QtGui import QWheelEvent, QPixmap, QImage, QKeyEvent, QSurfaceFormat
+from PySide6.QtWidgets import QFileDialog, QListWidgetItem, QInputDialog
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from pyglet.gl import *
 from pyglet.math import clamp
 
@@ -36,7 +38,7 @@ pyglet.image.Texture.default_mag_filter = GL_NEAREST
 
 
 class LoadedSheetFrame(QListWidgetItem):
-    def __init__(self, text, idx, image, label, editor: 'AnimationEditor'):
+    def __init__(self, text, idx, image, label, editor: AnimationEditor):
         super().__init__(text)
         self.image: pyglet.image.ImageData = image
         self.label = label
@@ -46,7 +48,7 @@ class LoadedSheetFrame(QListWidgetItem):
         data = self.image.get_image_data().get_data('RGBA', -self.image.width * 4)
         self.qim = QImage(data, image.width, image.height, QImage.Format.Format_RGBA8888).scaled(self.label.width(),
                                                                                                  self.label.height(),
-                                                                                                 QtCore.Qt.KeepAspectRatio)
+                                                                                    QtCore.Qt.AspectRatioMode.KeepAspectRatio)
         self.pix = QPixmap.fromImage(self.qim)
 
     # Define the double-click event handler
@@ -58,7 +60,7 @@ class LoadedSheetFrame(QListWidgetItem):
 
 
 class AnimGroupItem(QListWidgetItem):
-    def __init__(self, animGroup: 'AnimGroup', editor: 'AnimationEditor'):
+    def __init__(self, animGroup: 'AnimGroup', editor: AnimationEditor):
         self.animGroup = animGroup
         text = self._getAnimText()
         super().__init__(text)
@@ -97,7 +99,7 @@ class AnimGroupItem(QListWidgetItem):
 
 
 class AnimFrameItem(QListWidgetItem):
-    def __init__(self, animFrame: AnimFrame, editor: 'AnimationEditor'):
+    def __init__(self, animFrame: AnimFrame, editor: AnimationEditor):
         self.animFrame = animFrame
         self.editor = editor
         text = self._getText()
@@ -130,17 +132,7 @@ class AnimFrameItem(QListWidgetItem):
             self.editor.setAnimation()
 
 
-class ProxyStyle(QtWidgets.QProxyStyle):
-    """Used so Slider Tick positions can be manually clicked on."""
-
-    def styleHint(self, hint, opt=None, widget=None, returnData=None):
-        res = super().styleHint(hint, opt, widget, returnData)
-        if hint == self.SH_Slider_AbsoluteSetButtons:
-            res |= QtCore.Qt.LeftButton
-        return res
-
-
-class PygletWidget(QtWidgets.QOpenGLWidget):
+class PygletWidget(QOpenGLWidget):
     _default_vertex_source = """#version 150 core
         in vec4 position;
 
@@ -155,7 +147,7 @@ class PygletWidget(QtWidgets.QOpenGLWidget):
             gl_Position = window.projection * window.view * position;
         }
     """
-    _default_fragment_source = """#version 150 core
+    _default_fragment_source = """#version 330 core
         out vec4 color;
 
         void main()
@@ -164,7 +156,7 @@ class PygletWidget(QtWidgets.QOpenGLWidget):
         }
     """
 
-    def __init__(self, width, height, parent, mainWindow, editor: 'AnimationEditor'):
+    def __init__(self, width, height, parent, mainWindow, editor: AnimationEditor):
         super().__init__(parent)
         self.mainWindow = mainWindow
         self.setMinimumSize(width, height)
@@ -181,22 +173,22 @@ class PygletWidget(QtWidgets.QOpenGLWidget):
 
         self.elapsed = 0
 
-        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
 
     def keyPressEvent(self, event: QKeyEvent):
         super().keyPressEvent(event)
 
-        if event.key() == QtCore.Qt.Key_O:
+        if event.key() == QtCore.Qt.Key.Key_O:
             for sprite in self.editor.apSprites:
                 sprite.visible = not sprite.visible
-        elif event.key() == QtCore.Qt.Key_S:
+        elif event.key() == QtCore.Qt.Key.Key_S:
             if self.editor.shadow:
                 self.editor.shadow.visible = not self.editor.shadow.visible
 
     def wheelEvent(self, event: QWheelEvent):
         super().wheelEvent(event)
 
-        if event.modifiers() & QtCore.Qt.ControlModifier:
+        if event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier:
             if self.editor.sprite:
                 if event.angleDelta().y() > 0:
                     self.editor.sprite.opacity = clamp(self.editor.sprite.opacity - 50, 0, 255)
@@ -243,7 +235,6 @@ class PygletWidget(QtWidgets.QOpenGLWidget):
 
     def initializeGL(self):
         """Call anything that needs a context to be created."""
-
         self._projection_matrix = pyglet.math.Mat4()
         self._view_matrix = pyglet.math.Mat4()
 
@@ -253,13 +244,13 @@ class PygletWidget(QtWidgets.QOpenGLWidget):
             self._default_program = pyglet.graphics.shader.ShaderProgram(
                 pyglet.graphics.shader.Shader(self._default_vertex_source, 'vertex'),
                 pyglet.graphics.shader.Shader(self._default_fragment_source, 'fragment'))
-        except:
+        except pyglet.graphics.shader.ShaderException:
             self.error_dialog = QtWidgets.QMessageBox()
             self.error_dialog.setWindowTitle("Error")
-            self.error_dialog.setIcon(QtWidgets.QMessageBox.Critical)
-            self.error_dialog.setText("Could not compile shader. Requires OpenGL 3.3 capability.")
+            self.error_dialog.setIcon(QtWidgets.QMessageBox.Icon.Critical)
+            self.error_dialog.setText(f"Could not compile shader. Requires OpenGL 3.3 capability.")
             self.error_dialog.exec()
-            sys.exit(app.exec_())
+            sys.exit(app.exec())
 
         self.ubo = self._default_program.uniform_blocks['WindowBlock'].create_ubo()
 
@@ -305,7 +296,7 @@ class PygletWidget(QtWidgets.QOpenGLWidget):
 
 
 class BatchAddImplementation:
-    def __init__(self, window: QtWidgets.QWidget, editor: 'AnimationEditor', ui: 'Ui_BatchCreateAction'):
+    def __init__(self, window: QtWidgets.QWidget, editor: AnimationEditor, ui: 'Ui_BatchCreateAction'):
         self.window = window
         self.ui = ui
         self.editor = editor
@@ -322,7 +313,7 @@ class BatchAddImplementation:
 
             self.error_dialog = QtWidgets.QMessageBox()
             self.error_dialog.setWindowTitle("Warning")
-            self.error_dialog.setIcon(QtWidgets.QMessageBox.Warning)
+            self.error_dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
             self.error_dialog.setText("Both boxes cannot be the same name.")
             self.error_dialog.exec()
 
@@ -391,15 +382,15 @@ class BatchAddImplementation:
 
             error_dialog = QtWidgets.QMessageBox()
             error_dialog.setWindowTitle("Complete")
-            error_dialog.setIcon(QtWidgets.QMessageBox.Information)
+            error_dialog.setIcon(QtWidgets.QMessageBox.Icon.Information)
             error_dialog.setText(f"Operation completed with {ct} changes.")
             error_dialog.exec()
 
     def finalizeClick(self, button):
         role = self.ui.finalizeButtonBox.buttonRole(button)
-        if role == QtWidgets.QDialogButtonBox.ApplyRole:
+        if role == QtWidgets.QDialogButtonBox.ButtonRole.ApplyRole:
             self.apply()
-        elif role == QtWidgets.QDialogButtonBox.RejectRole:
+        elif role == QtWidgets.QDialogButtonBox.ButtonRole.RejectRole:
             self.window.hide()
 
     def loadedFrameData(self):
@@ -433,6 +424,7 @@ class AnimationEditor:
     maxRecent = 5
 
     def __init__(self, app: QtWidgets.QApplication, window: QtWidgets.QMainWindow, ui: Ui_MainWindow):
+        self._configureOpenGL()
         self.app = app
         self.window = window
         self.ui = ui
@@ -442,7 +434,7 @@ class AnimationEditor:
         self.batchAddImplem: Optional[BatchAddImplementation] = None
 
         self.settings = QSettings('MDFrameEditor', 'Frame Editor')
-        self.recentFiles = self.settings.value('recent', [])
+        self.recentFiles: object | list = self.settings.value('recent', [])
 
         self.enableTrim = self.settings.value('trim', True, bool)
         self.enableCollapse = self.settings.value('collapse', True, bool)
@@ -458,7 +450,8 @@ class AnimationEditor:
         self.recentFileActions = []
 
         for i in range(self.maxRecent):
-            action = QtWidgets.QAction(self.window, visible=False, triggered=self.loadRecentFile)
+            action = QtGui.QAction(self.window, visible=False)
+            action.triggered.connect(lambda checked=False, a=action: self.loadRecentFile(a))
             self.recentFileActions.append(action)
             self.ui.menuRecent.addAction(action)
 
@@ -566,7 +559,6 @@ class AnimationEditor:
         self.ui.actionListWidget.itemActivated.connect(lambda item: item.mouseClickEvent(None))
 
         self.ui.animationSpeedSlider.valueChanged.connect(lambda: self.changeAnimationSpeed())
-        self.ui.animationSpeedSlider.setStyle(ProxyStyle())
 
         self.ui.actionAddButton.clicked.connect(lambda: self.openAddAction())
         self.ui.actionDuplicateButton.clicked.connect(lambda: self.duplicateAction())
@@ -586,7 +578,11 @@ class AnimationEditor:
         self.ui.actionExportAll_Animations.triggered.connect(lambda: self.exportMultipleSheets())
         self.ui.actionExportSingle_Animation.triggered.connect(lambda: self.exportSingleSheet())
 
-        self.ui.frameSlider.setStyle(ProxyStyle())
+    def _configureOpenGL(self) -> None:
+        fmt = QSurfaceFormat()
+        fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+        fmt.setVersion(3, 3)
+        QSurfaceFormat.setDefaultFormat(fmt)
 
     def setReturnPoint(self):
         item: AnimFrameItem = self.ui.animationFrameList.currentItem()
@@ -774,7 +770,7 @@ class AnimationEditor:
         return True
 
     def createErrorPopup(self, text: str):
-        return QtWidgets.QMessageBox.critical(self.window, 'Error', text, QtWidgets.QMessageBox.Ok)
+        return QtWidgets.QMessageBox.critical(self.window, 'Error', text, QtWidgets.QMessageBox.StandardButton.Ok)
 
     def _getFrameUniformity(self, group: AnimGroup) -> Union[Set[Tuple], Literal[False]]:
         uniformDurations: Set[Tuple] = set()
@@ -917,9 +913,12 @@ class AnimationEditor:
         recentCount = min(len(self.recentFiles), self.maxRecent)
 
         for i in range(recentCount):
-            self.recentFileActions[i].setText(f"{QFileInfo(self.recentFiles[i]).filePath()}")
-            self.recentFileActions[i].setVisible(True)
-            self.recentFileActions[i].setData(self.recentFiles[i])
+            action = self.recentFileActions[i]
+            path = self.recentFiles[i]
+            action.setText(QFileInfo(path).fileName())
+            action.setText(f"{QFileInfo(path).filePath()}")
+            action.setVisible(True)
+            action.setData(path)
 
         for m in range(recentCount, self.maxRecent):
             self.recentFileActions[m].setVisible(False)
@@ -931,8 +930,8 @@ class AnimationEditor:
 
             ret = QtWidgets.QMessageBox.question(self.window, '',
                                                  f"Are you sure you want to delete {current.animGroup.name}?",
-                                                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
-            if ret == QtWidgets.QMessageBox.Yes:
+                                                 QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+            if ret == QtWidgets.QMessageBox.StandardButton.Yes:
                 row = self.ui.actionListWidget.row(current)
                 taken = self.ui.actionListWidget.takeItem(row)
                 del taken
@@ -1284,8 +1283,7 @@ class AnimationEditor:
             self.ui.xShadowSpinbox.blockSignals(False)
             self.ui.yShadowSpinBox.blockSignals(False)
 
-    def loadRecentFile(self):
-        action = self.window.sender()
+    def loadRecentFile(self, action):
         if action:
             path: str = action.data()
 
@@ -1397,8 +1395,8 @@ class AnimationEditor:
                        f"Images may be cut incorrectly. Continue anyway?")
 
             result = QtWidgets.QMessageBox.warning(self.window, 'Warning', warning,
-                                                   QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
-            if result == QtWidgets.QMessageBox.No:
+                                                   QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+            if result == QtWidgets.QMessageBox.StandardButton.No:
                 return
 
         self.frameWidth = width
@@ -1406,7 +1404,7 @@ class AnimationEditor:
         self.shadowSize = shadowSize
 
         anims = root.find('Anims')
-        if not anims:
+        if anims is None:
             self.ui.statusBar.showMessage("Unable to find any Animation XML data.", 5000)
             return
 
@@ -2117,8 +2115,7 @@ class AnimationEditor:
 
     def exportSingleSheet(self):
         if self.loadedTree:
-            options = QFileDialog.Options()
-            options |= QFileDialog.ShowDirsOnly
+            options = QFileDialog.Option.ShowDirsOnly
 
             directory = QFileDialog.getExistingDirectory(self.window, "Select Directory for Single Sheet", "", options)
 
@@ -2137,8 +2134,7 @@ class AnimationEditor:
 
     def exportMultipleSheets(self):
         if self.loadedTree:
-            options = QFileDialog.Options()
-            options |= QFileDialog.ShowDirsOnly
+            options = QFileDialog.Option.ShowDirsOnly
 
             directory = QFileDialog.getExistingDirectory(self.window, "Select Directory for Multi-Sheets", "", options)
 
@@ -2326,7 +2322,7 @@ class AnimationEditor:
             pass
 
     def exitApplication(self):
-        sys.exit(app.exec_())
+        sys.exit(app.exec())
 
 
 def excepthook(exc_type, exc_value, exc_tb):
@@ -2335,11 +2331,11 @@ def excepthook(exc_type, exc_value, exc_tb):
 
 
 if __name__ == "__main__":
+    sys.excepthook = excepthook
     app = QtWidgets.QApplication(sys.argv)
     ui = Ui_MainWindow()
-    sys.excepthook = excepthook
     mainWindow = QtWidgets.QMainWindow()
     ui.setupUi(mainWindow)
     implementation = AnimationEditor(app, mainWindow, ui)
     mainWindow.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())

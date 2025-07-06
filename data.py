@@ -260,11 +260,11 @@ def centerBounds(rect: Rectangle):
 
 @dataclass
 class ActionPoints:
-    leftHand: Offset = Offset() # red[1]
-    center: Offset = Offset()  # green[2]
-    rightHand: Offset = Offset()  # blue[3]
-    head: Offset = Offset() # black
-    shadow: Offset = Offset()  # white[4]
+    leftHand: Offset = field(default_factory=Offset) # red[1]
+    center: Offset = field(default_factory=Offset)  # green[2]
+    rightHand: Offset  = field(default_factory=Offset) # blue[3]
+    head: Offset  = field(default_factory=Offset) # black
+    shadow: Offset = field(default_factory=Offset)  # white[4]
 
     @property
     def centerFlip(self):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import math
 import os
+import pathlib
 import sys
 import traceback
 import xml.etree.ElementTree as ElementTree
@@ -467,7 +468,13 @@ class AnimationEditor:
         self.actionGrid: Optional[TopLeftGrid] = None
         self.actionPoints: dict[int, ActionPoints] = {}
 
-        self.shadowImage = pyglet.image.load("shadow.png")
+        if getattr(sys, 'frozen', False):
+            app_dir = pathlib.Path(sys._MEIPASS)
+        else:
+            app_dir = pathlib.Path(__file__).resolve().parent
+
+        shadow_image_path = app_dir / "shadow.png"
+        self.shadowImage = pyglet.image.load(shadow_image_path)
         self.shadowImage.anchor_x = self.shadowImage.width // 2
         self.shadowImage.anchor_y = self.shadowImage.height // 2
 

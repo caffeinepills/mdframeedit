@@ -33,7 +33,7 @@ exe = EXE(pyz,
           disable_windowed_traceback=False,
           target_arch=None,
           codesign_identity=None,
-          entitlements_file=None )
+          entitlements_file=None)
 coll = COLLECT(exe,
                a.binaries,
                a.zipfiles,
@@ -42,3 +42,7 @@ coll = COLLECT(exe,
                upx=True,
                upx_exclude=[],
                name='MD Frame Editor')
+app = BUNDLE(coll,
+         name='MDFrameEditor.app',
+         icon=None,
+         bundle_identifier=None)

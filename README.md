@@ -19,9 +19,16 @@ For an easier time, use existing FrameData or AnimData to use and modify. Also m
 
 If you want to build yourself, you can do so via Pyinstaller: `pyinstaller MDFrameEditor.spec` or Nuitka.
 
-Download for a Windows version is provided. Untested on Linux and Mac, although it should build and work there.
+Download for a Windows and MacOS version are provided. Untested on Linux, although it should build and work there.
 
 ----
+1.4.3:
+* Change: From PyQt5 to PySide6.
+* Fix: ActionPoints factory issue on newer Pythons.
+* Fix: Change arrow keys to be unicode versions, otherwise they show as invalid characters in MacOS.
+* Fix: Update Batch Add Layout.
+* Add: Specfile support for MacOS.
+
 1.4.2:
 * Fix: Shadow saving as brown instead of black.
 * Change: Now checks for multi-sheet export eligibility before outputting frames.

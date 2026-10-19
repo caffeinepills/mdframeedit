@@ -5,6 +5,8 @@ import math
 import os
 import pathlib
 import sys
+import shutil
+import tempfile
 import traceback
 import xml.etree.ElementTree as ElementTree
 from collections import defaultdict
@@ -28,11 +30,12 @@ from pyglet.gl import *
 from pyglet.math import clamp
 
 from data import *
+from formats import validate_source, validate_export, detect_format
 from gui.batchadd import Ui_BatchCreateAction
 from gui.editor import Ui_MainWindow
-from utils import (TopLeftGrid, Camera, checkDuplicateImages, roundUpToMult, centerAndApplyOffset,
-                   getActionPointsFromImage, getActionPointsFromPILImage, getShadowLocationFromPILImage,
-                   createPlusImage, overlapColors)
+from utils import (FormatError, integer, TopLeftGrid, Camera, check_duplicate_images, round_up_to_mult, center_and_apply_offset,
+                   get_action_points_from_image, get_action_points_from_pil_image, get_shadow_location_from_pil_image,
+                   create_plus_image, overlap_colors, shadow_image, template_image)
 
 pyglet.image.Texture.default_min_filter = GL_NEAREST
 pyglet.image.Texture.default_mag_filter = GL_NEAREST
@@ -54,83 +57,86 @@ class LoadedSheetFrame(QListWidgetItem):
 
     # Define the double-click event handler
     def mouseDoubleClickEvent(self, event):
-        self.editor.addNewAnimationFrame(self.idx)
+        self.editor.add_new_animation_frame(self.idx)
 
     def mouseClickEvent(self, event):
         self.label.setPixmap(self.pix)
 
 
 class AnimGroupItem(QListWidgetItem):
-    def __init__(self, animGroup: 'AnimGroup', editor: AnimationEditor):
-        self.animGroup = animGroup
-        text = self._getAnimText()
+    def __init__(self, anim_group: 'AnimGroup', editor: AnimationEditor):
+        self.anim_group = anim_group
+        self.editor = editor
+        text = self._get_anim_text()
         super().__init__(text)
         self.editor = editor
 
-    def updateText(self):
-        self.setText(self._getAnimText())
+    def update_text(self):
+        self.setText(self._get_anim_text())
 
-    def _getAnimText(self):
-        text = f"{self.animGroup.idx if self.animGroup.idx >= 0 else '?'}. {self.animGroup.name}"
-        if self.animGroup.copyName:
-            text += f" [{self.animGroup.copyName}]"
+    def _get_anim_text(self):
+        text = f"{self.anim_group.idx if self.anim_group.idx >= 0 else '?'}. {self.anim_group.name}"
+        if self.anim_group.copy_name:
+            text += f" [{self.anim_group.copy_name}]"
 
-        if self.animGroup.modified:
+        if self.anim_group.modified:
             text += " *"
 
         return text
 
     def mouseClickEvent(self, event):
-        self.editor.currentAnimGroup = self.animGroup
+        self.editor.current_anim_group = self.anim_group
 
-        self.editor.currentSequence = self.animGroup.directions[self.editor.currentDirection]
+        self.editor.current_sequence = self.anim_group.directions[self.editor.current_direction]
 
-        self.editor.clearAnimFrame()
+        self.editor.clear_anim_frame()
 
-        if self.editor.currentSequence.frames:
-            self.editor.currentAnimFrame = self.editor.currentSequence.frames[0]
+        if self.editor.current_sequence.frames:
+            self.editor.current_anim_frame = self.editor.current_sequence.frames[0]
 
-            self.editor.setSequenceList()
+            self.editor.set_sequence_list()
 
             self.editor.ui.animationFrameList.setCurrentRow(0)
 
-            self.editor.setAnimFrameValues(self.editor.currentAnimFrame)
+            self.editor.set_anim_frame_values(self.editor.current_anim_frame)
 
-            self.editor.ui.statusBar.showMessage(f"Active action: {self.animGroup.name}.")
+            self.editor.ui.statusBar.showMessage(f"Active action: {self.anim_group.name}.")
 
 
 class AnimFrameItem(QListWidgetItem):
-    def __init__(self, animFrame: AnimFrame, editor: AnimationEditor):
-        self.animFrame = animFrame
+    def __init__(self, anim_frame: AnimFrame, editor: AnimationEditor):
+        self.anim_frame = anim_frame
         self.editor = editor
-        text = self._getText()
+        text = self._get_text()
         super().__init__(text)
+        self.update_text()
 
-    def updateText(self):
-        self.setText(self._getText())
+    def update_text(self):
+        self.setText(self._get_text())
 
-    def _getText(self):
-        text = f"#{self.animFrame.frameIndex}"
+    def _get_text(self):
+        text = f"#{self.anim_frame.frame_index}"
+        rush, hit, returned = self.editor.current_anim_group.event_frames(self.editor.current_sequence)
 
-        if self.animFrame.idx == self.editor.currentAnimGroup.hitFrame:
+        if self.anim_frame.idx == hit:
             text += " (HF)"
-        if self.animFrame.idx == self.editor.currentAnimGroup.rushFrame:
+        if self.anim_frame.idx == rush:
             text += " (RF)"
-        if self.animFrame.idx == self.editor.currentAnimGroup.returnFrame:
+        if self.anim_frame.idx == returned:
             text += " (RTF)"
 
         return text
 
     def mouseClickEvent(self, event):
-        self.editor.setAnimFrameValues(self.animFrame)
+        self.editor.set_anim_frame_values(self.anim_frame)
 
         if not self.editor.animating:
-            if self.animFrame == self.editor.currentAnimFrame:
+            if self.anim_frame == self.editor.current_anim_frame:
                 return
 
-            self.editor.currentAnimFrame = self.animFrame
-            self.editor.ui.frameSlider.setValue(self.animFrame.idx)
-            self.editor.setAnimation()
+            self.editor.current_anim_frame = self.anim_frame
+            self.editor.ui.frameSlider.setValue(self.anim_frame.idx)
+            self.editor.set_animation()
 
 
 class PygletWidget(QOpenGLWidget):
@@ -168,9 +174,9 @@ class PygletWidget(QOpenGLWidget):
         self.timer.setInterval(0)
         self.timer.start()
 
-        self.focusPoint = self.width() // 2, self.height() // 3
+        self.focus_point = self.width() // 2, self.height() // 3
 
-        self.camera = Camera(self, self.focusPoint)
+        self.camera = Camera(self, self.focus_point)
 
         self.elapsed = 0
 
@@ -180,7 +186,7 @@ class PygletWidget(QOpenGLWidget):
         super().keyPressEvent(event)
 
         if event.key() == QtCore.Qt.Key.Key_O:
-            for sprite in self.editor.apSprites:
+            for sprite in self.editor.ap_sprites:
                 sprite.visible = not sprite.visible
         elif event.key() == QtCore.Qt.Key.Key_S:
             if self.editor.shadow:
@@ -214,16 +220,24 @@ class PygletWidget(QOpenGLWidget):
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
+        self._update_camera_focus()
         with self.camera:
             self.batch.draw()
+
+    def _update_camera_focus(self):
+        if self.camera.zoom > 1 and self.editor.sprite is not None:
+            self.camera.x, self.camera.y = self.editor.sprite.position[:2]
+        else:
+            self.camera.x = self.width() // 2
+            self.camera.y = self.height() // 3
 
     def resizeGL(self, width, height):
         self.projection = pyglet.math.Mat4.orthogonal_projection(0, width, 0, height, -255, 255)
 
         self.viewport = 0, 0, width, height
 
-        self.focusPoint = width // 2, height // 3
-        self.camera.x, self.camera.y = self.focusPoint
+        self.focus_point = width // 2, height // 3
+        self.camera.x, self.camera.y = self.focus_point
 
         self.lines = [
             pyglet.shapes.Line(0, self.height() // 3, self.width(), self.height() // 3, batch=self.batch),
@@ -231,8 +245,8 @@ class PygletWidget(QOpenGLWidget):
         ]
 
         if self.editor.sprite:
-            self.editor.sprite.position = self.editor.getSpritePosition()
-            self.editor.shadow.position = self.editor.getShadowPosition()
+            self.editor.sprite.position = self.editor.get_sprite_position()
+            self.editor.shadow.position = self.editor.get_shadow_position()
 
     def initializeGL(self):
         """Call anything that needs a context to be created."""
@@ -302,11 +316,11 @@ class BatchAddImplementation:
         self.ui = ui
         self.editor = editor
 
-        self.ui.openDirectory.clicked.connect(lambda: self.openDirectory())
+        self.ui.openDirectory.clicked.connect(lambda: self.open_directory())
 
-        self.loadedFrameData()
+        self.loaded_frame_data()
 
-        self.ui.finalizeButtonBox.clicked.connect(self.finalizeClick)
+        self.ui.finalizeButtonBox.clicked.connect(self.finalize_click)
 
     def apply(self):
 
@@ -322,62 +336,62 @@ class BatchAddImplementation:
             if not self.ui.directoryLineEdit.text():
                 return
 
-            useAction: AnimGroup = self.ui.actionComboBox.currentData()
-            copyAction: AnimGroup = self.ui.copyComboBox.currentData()
+            use_action: AnimGroup = self.ui.actionComboBox.currentData()
+            copy_action: AnimGroup = self.ui.copyComboBox.currentData()
 
             overwrite = self.ui.overwriteCheckbox.isChecked()
             fulldata = self.ui.fullDataCheckbox.isChecked()
 
-            _useIdx = self.ui.indexSpinBox.value()
-            groupIdx = _useIdx if _useIdx >= 0 else useAction.idx
+            _use_idx = self.ui.indexSpinBox.value()
+            group_idx = _use_idx if _use_idx >= 0 else use_action.idx
             collapse = self.editor.ui.actionCollapse_Singles.isChecked()
 
             ct = 0
             for dirpath, dirnames, filenames in os.walk(self.ui.directoryLineEdit.text()):
                 for filename in filenames:
                     if filename == "FrameData.xml":
-                        fileName = os.path.join(dirpath, filename)
-                        data = ElementTree.parse(fileName)
+                        file_name = os.path.join(dirpath, filename)
+                        data = ElementTree.parse(file_name)
 
                         root = data.getroot()
 
-                        animsEl = root.find("Anims")
+                        anims_el = root.find("Anims")
 
                         exists = False
                         write = False
-                        for actionAnim in animsEl:
-                            for animEl in actionAnim:
-                                if animEl.tag == "Name":
+                        for action_anim in anims_el:
+                            for anim_el in action_anim:
+                                if anim_el.tag == "Name":
                                     # Found one...
-                                    if animEl.text.lower() == useAction.name.lower():
+                                    if anim_el.text.lower() == use_action.name.lower():
                                         exists = True
 
                                         if overwrite:
                                             # Clear existing anim.
-                                            actionAnim.clear()
-                                            if self.editor.createBaseAnimGroupXML(actionAnim, useAction.name, groupIdx,
-                                                                                  copyAction,
+                                            action_anim.clear()
+                                            if self.editor.create_base_anim_group_xml(action_anim, use_action.name, group_idx,
+                                                                                  copy_action,
                                                                                   trim=not fulldata,
-                                                                                  copyName=copyAction.name):
-                                                self.editor.createSingleSheetFrameData(actionAnim, copyAction, collapse)
+                                                                                  copy_name=copy_action.name):
+                                                self.editor.create_single_sheet_frame_data(action_anim, copy_action, collapse)
 
                                             write = True
                                         else:
                                             break
 
                         if not exists:
-                            animEl = ElementTree.SubElement(animsEl, "Anim")
-                            if self.editor.createBaseAnimGroupXML(animEl, useAction.name, groupIdx, copyAction,
+                            anim_el = ElementTree.SubElement(anims_el, "Anim")
+                            if self.editor.create_base_anim_group_xml(anim_el, use_action.name, group_idx, copy_action,
                                                                   trim=not fulldata,
-                                                                  copyName=copyAction.name):
-                                self.editor.createSingleSheetFrameData(animEl, copyAction, collapse)
+                                                                  copy_name=copy_action.name):
+                                self.editor.create_single_sheet_frame_data(anim_el, copy_action, collapse)
                             write = True
 
                         if write:
                             ElementTree.indent(root)
 
                             tree = ElementTree.ElementTree(root)
-                            tree.write(fileName, encoding='utf-8', xml_declaration=True)
+                            tree.write(file_name, encoding='utf-8', xml_declaration=True)
 
                             ct += 1
 
@@ -387,29 +401,29 @@ class BatchAddImplementation:
             error_dialog.setText(f"Operation completed with {ct} changes.")
             error_dialog.exec()
 
-    def finalizeClick(self, button):
+    def finalize_click(self, button):
         role = self.ui.finalizeButtonBox.buttonRole(button)
         if role == QtWidgets.QDialogButtonBox.ButtonRole.ApplyRole:
             self.apply()
         elif role == QtWidgets.QDialogButtonBox.ButtonRole.RejectRole:
             self.window.hide()
 
-    def loadedFrameData(self):
+    def loaded_frame_data(self):
         self.ui.copyComboBox.clear()
         self.ui.actionComboBox.clear()
 
-        self.fillActionList()
-        self.fillCopyList()
+        self.fill_action_list()
+        self.fill_copy_list()
 
-    def fillActionList(self):
+    def fill_action_list(self):
         for a in self.editor.groups:
             self.ui.actionComboBox.addItem(a.name, userData=a)
 
-    def fillCopyList(self):
+    def fill_copy_list(self):
         for a in self.editor.groups:
             self.ui.copyComboBox.addItem(a.name, userData=a)
 
-    def openDirectory(self):
+    def open_directory(self):
         directory = QFileDialog.getExistingDirectory(self.window, "Select Directory")
 
         self.ui.directoryLineEdit.setText(directory)
@@ -419,113 +433,110 @@ REDUCE_RUSH_FRAMES = False
 
 
 class AnimationEditor:
-    shadowImage: Optional[pyglet.image.AbstractImage]
+    shadow_image: Optional[pyglet.image.AbstractImage]
     sprite: Optional[pyglet.sprite.Sprite]
-    animationSpeedSliderValues = (0.1, 0.25, 0.5, 1, 2)
-    maxRecent = 5
+    ANIMATION_SPEED_SLIDER_VALUES = (0.1, 0.25, 0.5, 1, 2)
+    MAX_RECENT = 5
 
     def __init__(self, app: QtWidgets.QApplication, window: QtWidgets.QMainWindow, ui: Ui_MainWindow):
-        self._configureOpenGL()
+        self._configure_open_gl()
         self.app = app
         self.window = window
         self.ui = ui
         self.groups: List[AnimGroup] = []
-        self.fileName = ''
-        self.loadedTree: Optional[ElementTree] = None
-        self.batchAddImplem: Optional[BatchAddImplementation] = None
+        self.file_name = ''
+        self.sheet_format = None
+        self.shadow_size_present = True
+        self.loaded_shadow_size = 0
+        self.loaded_tree: Optional[ElementTree] = None
+        self.batch_add_implem: Optional[BatchAddImplementation] = None
 
         self.settings = QSettings('MDFrameEditor', 'Frame Editor')
-        self.recentFiles: object | list = self.settings.value('recent', [])
+        self.recent_files = self.settings.value('recent', [], list)
 
-        self.enableTrim = self.settings.value('trim', True, bool)
-        self.enableCollapse = self.settings.value('collapse', True, bool)
+        self.enable_trim = self.settings.value('trim', True, bool)
+        self.enable_collapse = self.settings.value('collapse', True, bool)
 
-        self.ui.actionCollapse_Singles.setChecked(self.enableCollapse)
-        self.ui.actionTrim_Copies.setChecked(self.enableTrim)
+        self.ui.actionCollapse_Singles.setChecked(self.enable_collapse)
+        self.ui.actionTrim_Copies.setChecked(self.enable_trim)
 
-        self.ui.actionCollapse_Singles.changed.connect(lambda: self.saveCollapse())
-        self.ui.actionTrim_Copies.changed.connect(lambda: self.saveTrim())
+        self.ui.actionCollapse_Singles.changed.connect(lambda: self.save_collapse())
+        self.ui.actionTrim_Copies.changed.connect(lambda: self.save_trim())
 
-        self.ui.actionExit.triggered.connect(lambda: self.exitApplication())
+        self.ui.actionExit.triggered.connect(lambda: self.exit_application())
 
         self.recentFileActions = []
 
-        for i in range(self.maxRecent):
+        for i in range(self.MAX_RECENT):
             action = QtGui.QAction(self.window, visible=False)
-            action.triggered.connect(lambda checked=False, a=action: self.loadRecentFile(a))
+            action.triggered.connect(lambda checked=False, a=action: self.load_recent_file(a))
             self.recentFileActions.append(action)
             self.ui.menuRecent.addAction(action)
 
-        self._updateRecentActions()
+        self._update_recent_actions()
 
         self.scale = 2.0  # default sprite scaling.
 
-        self.animSpeed = 1 / 60
-        self.sheetImage: Optional[pyglet.image.ImageData] = None
-        self.imageGrid: Optional[TopLeftGrid] = None
+        self.anim_speed = 1 / 60
+        self.sheet_image: Optional[pyglet.image.ImageData] = None
+        self.image_grid: Optional[TopLeftGrid] = None
 
-        self.actionPtImage: Optional[pyglet.image.ImageData] = None
-        self.actionGrid: Optional[TopLeftGrid] = None
-        self.actionPoints: dict[int, ActionPoints] = {}
+        self.action_pt_image: Optional[pyglet.image.ImageData] = None
+        self.action_grid: Optional[TopLeftGrid] = None
+        self.action_points: dict[int, ActionPoints] = {}
+        self.loaded_action_points = {}
 
-        if getattr(sys, 'frozen', False):
-            app_dir = pathlib.Path(sys._MEIPASS)
-        else:
-            app_dir = pathlib.Path(__file__).resolve().parent
-
-        shadow_image_path = app_dir / "shadow.png"
-        with open(shadow_image_path, 'rb') as shadow_file:
-            self.shadowImage = pyglet.image.load(shadow_image_path, file=shadow_file)
-        self.shadowImage.anchor_x = self.shadowImage.width // 2
-        self.shadowImage.anchor_y = self.shadowImage.height // 2
+        self.shadow_image = self._shadow_image_data(template_image())
+        self._shadow_size = 0
+        self._shadow_display_images = {}
 
         self.sprite = None
         self.shadow: Optional[pyglet.sprite.Sprite] = None
 
-        self.markerSize = 5
-        self.actionPointMarker = createPlusImage(self.markerSize, (255, 255, 255, 255))
-        self.actionPointMarker.anchor_x = self.markerSize // 2
-        self.actionPointMarker.anchor_y = self.markerSize // 2
-        self.leftHand: Optional[pyglet.sprite.Sprite] = None
+        self.marker_size = 5
+        self.action_point_marker = create_plus_image(self.marker_size, (255, 255, 255, 255))
+        self.action_point_marker.anchor_x = self.marker_size // 2
+        self.action_point_marker.anchor_y = self.marker_size // 2
+        self.left_hand: Optional[pyglet.sprite.Sprite] = None
         self.center: Optional[pyglet.sprite.Sprite] = None
-        self.rightHand: Optional[pyglet.sprite.Sprite] = None
+        self.right_hand: Optional[pyglet.sprite.Sprite] = None
         self.head: Optional[pyglet.sprite.Sprite] = None
 
-        self.apSprites = []
+        self.ap_sprites = []
 
-        self.currentDirection = 0
+        self.current_direction = 0
         self.animating = False
         self.newWindow = None
 
-        self.singleLoaded = None
+        self.single_loaded = None
 
         # Set when opened for non-XML access.
-        self.frameWidth = 0
-        self.frameHeight = 0
-        self.shadowSize = 0
+        self.frame_width = 0
+        self.frame_height = 0
+        self.shadow_size = 0
 
-        self.copiedSequence: Optional[AnimationSequence] = None
+        self.copied_sequence: Optional[AnimationSequence] = None
 
         # self.window.setFixedSize(670, 836)
 
-        self.currentSequence: Optional[AnimationSequence] = None
-        self.currentAnimFrame: Optional[AnimFrame] = None
-        self.currentAnimGroup: Optional[AnimGroup] = None
+        self.current_sequence: Optional[AnimationSequence] = None
+        self.current_anim_frame: Optional[AnimFrame] = None
+        self.current_anim_group: Optional[AnimGroup] = None
 
-        self.ui.actionLoad.triggered.connect(lambda: self._loadAnimationDialog())
+        self.ui.actionLoad.triggered.connect(lambda: self._load_animation_dialog())
 
-        self.ui.playButton.clicked.connect(lambda: self.playAnimation())
+        self.ui.playButton.clicked.connect(lambda: self.play_animation())
 
-        self.ui.frameDownReorderButton.clicked.connect(lambda: self.moveFrameDown())
-        self.ui.frameUpReorderButton.clicked.connect(lambda: self.moveFrameUp())
+        self.ui.frameDownReorderButton.clicked.connect(lambda: self.move_frame_down())
+        self.ui.frameUpReorderButton.clicked.connect(lambda: self.move_frame_up())
 
         self.ui.animationFrameList.itemClicked.connect(lambda item: item.mouseClickEvent(None))
 
         self.directionButtons = [self.ui.buttonDown, self.ui.buttonDownLeft, self.ui.buttonLeft, self.ui.buttonUpLeft,
                                  self.ui.buttonUp, self.ui.buttonUpRight, self.ui.buttonRight, self.ui.buttonDownRight]
 
-        for dirIdx, button in enumerate(self.directionButtons):
-            button.clicked.connect(partial(self.setDirection, self.directionButtons.index(button)))
+        for dir_idx, button in enumerate(self.directionButtons):
+            button.clicked.connect(partial(self.set_direction, self.directionButtons.index(button)))
             button.setCheckable(True)
 
         self.ui.buttonDown.toggle()
@@ -543,175 +554,254 @@ class AnimationEditor:
 
         self.ui.frameSlider.setMaximum(0)
 
-        self.ui.frameIndexSpinBox.valueChanged.connect(lambda: self.frameIndexChanged())
+        self.ui.frameIndexSpinBox.valueChanged.connect(lambda: self.frame_index_changed())
 
-        self.ui.copySequenceButton.clicked.connect(lambda: self.copySequence())
-        self.ui.pasteSequenceButton.clicked.connect(lambda: self.pasteSequence())
+        self.ui.copySequenceButton.clicked.connect(lambda: self.copy_sequence())
+        self.ui.pasteSequenceButton.clicked.connect(lambda: self.paste_sequence())
 
-        self.ui.xSpinBox.valueChanged.connect(lambda: self.spriteOffsetChanged())
-        self.ui.ySpinBox.valueChanged.connect(lambda: self.spriteOffsetChanged())
+        self.ui.xSpinBox.valueChanged.connect(lambda: self.sprite_offset_changed())
+        self.ui.ySpinBox.valueChanged.connect(lambda: self.sprite_offset_changed())
 
-        self.ui.xShadowSpinbox.valueChanged.connect(lambda: self.shadowOffsetChanged())
-        self.ui.yShadowSpinBox.valueChanged.connect(lambda: self.shadowOffsetChanged())
+        self.ui.xShadowSpinbox.valueChanged.connect(lambda: self.shadow_offset_changed())
+        self.ui.yShadowSpinBox.valueChanged.connect(lambda: self.shadow_offset_changed())
 
-        self.ui.durationSpinBox.valueChanged.connect(lambda: self.durationChanged())
-        self.ui.mirroredCheckbox.clicked.connect(lambda: self.flipChanged())
+        self.ui.durationSpinBox.valueChanged.connect(lambda: self.duration_changed())
+        self.ui.mirroredCheckbox.clicked.connect(lambda: self.flip_changed())
 
-        self.ui.frameSlider.valueChanged.connect(lambda: self.sliderChange())
-        self.ui.frameDuplicateButton.clicked.connect(lambda: self.duplicateFrame())
-        self.ui.frameDeleteButton.clicked.connect(lambda: self.deleteSelectedFrames())
+        self.ui.frameSlider.valueChanged.connect(lambda: self.slider_change())
+        self.ui.frameDuplicateButton.clicked.connect(lambda: self.duplicate_frame())
+        self.ui.frameDeleteButton.clicked.connect(lambda: self.delete_selected_frames())
 
         self.ui.loadedSheetFrameList.itemDoubleClicked.connect(lambda item: item.mouseDoubleClickEvent(None))
         self.ui.loadedSheetFrameList.itemClicked.connect(lambda item: item.mouseClickEvent(None))
 
         self.ui.actionListWidget.itemActivated.connect(lambda item: item.mouseClickEvent(None))
 
-        self.ui.animationSpeedSlider.valueChanged.connect(lambda: self.changeAnimationSpeed())
+        self.ui.animationSpeedSlider.valueChanged.connect(lambda: self.change_animation_speed())
 
-        self.ui.actionAddButton.clicked.connect(lambda: self.openAddAction())
-        self.ui.actionDuplicateButton.clicked.connect(lambda: self.duplicateAction())
-        self.ui.actionDeleteButton.clicked.connect(lambda: self.deleteAction())
+        self.ui.actionAddButton.clicked.connect(lambda: self.open_add_action())
+        self.ui.actionDuplicateButton.clicked.connect(lambda: self.duplicate_action())
+        self.ui.actionDeleteButton.clicked.connect(lambda: self.delete_action())
 
-        self.ui.actionSave.triggered.connect(lambda: self.saveActionTrigger())
-        self.ui.actionSave_As.triggered.connect(lambda: self.saveAsActionTrigger())
+        self.ui.actionSave.triggered.connect(lambda: self.save_action_trigger())
+        self.ui.actionSave_As.triggered.connect(lambda: self.save_as_action_trigger())
 
-        self.ui.defaultFrameButton.clicked.connect(lambda: self.defaultFrameClick())
+        self.ui.defaultFrameButton.clicked.connect(lambda: self.default_frame_click())
 
-        self.ui.menuBatch.triggered.connect(lambda: self.openBatchAdd())
+        self.ui.menuBatch.triggered.connect(lambda: self.open_batch_add())
 
-        self.ui.returnPointButton.clicked.connect(lambda: self.setReturnPoint())
-        self.ui.hitPointButton.clicked.connect(lambda: self.setHitPoint())
-        self.ui.rushPointButton.clicked.connect(lambda: self.setRushPoint())
+        self.ui.returnPointButton.clicked.connect(lambda: self.set_return_point())
+        self.ui.hitPointButton.clicked.connect(lambda: self.set_hit_point())
+        self.ui.rushPointButton.clicked.connect(lambda: self.set_rush_point())
 
-        self.ui.actionExportAll_Animations.triggered.connect(lambda: self.exportMultipleSheets())
-        self.ui.actionExportSingle_Animation.triggered.connect(lambda: self.exportSingleSheet())
+        self.ui.actionExportAll_Animations.triggered.connect(lambda: self.export_multiple_sheets())
+        self.ui.actionExportSingle_Animation.triggered.connect(lambda: self.export_single_sheet())
 
-    def _configureOpenGL(self) -> None:
+        self.ui.shadowSizeComboBox.currentIndexChanged.connect(self.apply_shadow_size)
+        self.ui.previewShadowCheckBox.toggled.connect(self._refresh_shadow_display)
+
+    @staticmethod
+    def _shadow_image_data(image):
+        data = pyglet.image.ImageData(image.width, image.height, 'RGBA', image.tobytes(),
+                                      pitch=-image.width * 4)
+        data.anchor_x = image.width // 2
+        data.anchor_y = image.height // 2
+        return data
+
+    @property
+    def shadow_size(self):
+        return self._shadow_size
+
+    @shadow_size.setter
+    def shadow_size(self, size):
+        self._shadow_size = size
+        if size in (0, 1, 2):
+            with QtCore.QSignalBlocker(self.ui.shadowSizeComboBox):
+                self.ui.shadowSizeComboBox.setCurrentIndex(size)
+            self.ui.shadowSizeComboBox.setEnabled(self.loaded_tree is not None)
+        if hasattr(self, 'openGLWidget') and size in (0, 1, 2):
+            self._refresh_shadow_display()
+
+    def _display_shadow_image(self):
+        if not self.ui.previewShadowCheckBox.isChecked():
+            return self.shadow_image
+        size = self.shadow_size
+        if size not in self._shadow_display_images:
+            self._shadow_display_images[size] = self._shadow_image_data(shadow_image(size, black=True))
+        return self._shadow_display_images[size]
+
+    def _refresh_shadow_display(self):
+        if self.shadow is not None:
+            self.openGLWidget.makeCurrent()
+            self.shadow.image = self._display_shadow_image()
+            self.openGLWidget.update()
+
+    def apply_shadow_size(self, size):
+        if not self.loaded_tree:
+            return
+        self.shadow_size = size
+        # An explicit selection writes ShadowSize even if it was omitted on input.
+        self.shadow_size_present = True
+        for item in self._get_action_list_items():
+            item.anim_group.modified = True
+            item.update_text()
+        self.ui.statusBar.showMessage('Shadow size set for all frames. Save to keep this change.', 5000)
+
+    def _configure_open_gl(self) -> None:
         fmt = QSurfaceFormat()
         fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
         fmt.setVersion(3, 3)
         QSurfaceFormat.setDefaultFormat(fmt)
 
-    def setReturnPoint(self):
+    def set_return_point(self):
         item: AnimFrameItem = self.ui.animationFrameList.currentItem()
-        if item and self.currentAnimGroup:
+        if item and self.current_anim_group:
             idx = self.ui.animationFrameList.row(item)
-            if self.currentAnimGroup.returnFrame != idx:
-                self.currentAnimGroup.returnFrame = idx
-            elif self.currentAnimGroup.returnFrame == idx:
-                self.currentAnimGroup.returnFrame = -1
+            if self.current_anim_group.return_frame != idx:
+                self.current_anim_group.return_frame = idx
+            elif self.current_anim_group.return_frame == idx:
+                self.current_anim_group.return_frame = -1
 
-            for frameItem in self._getFrameListItems():
-                frameItem.updateText()
+            for frame_item in self._get_frame_list_items():
+                frame_item.update_text()
 
-    def setHitPoint(self):
+    def set_hit_point(self):
         item: AnimFrameItem = self.ui.animationFrameList.currentItem()
-        if item and self.currentAnimGroup:
+        if item and self.current_anim_group:
             idx = self.ui.animationFrameList.row(item)
-            if self.currentAnimGroup.hitFrame != idx:
-                self.currentAnimGroup.hitFrame = idx
-            elif self.currentAnimGroup.hitFrame == idx:
-                self.currentAnimGroup.hitFrame = -1
+            if self.current_anim_group.hit_frame != idx:
+                self.current_anim_group.hit_frame = idx
+            elif self.current_anim_group.hit_frame == idx:
+                self.current_anim_group.hit_frame = -1
 
-            for frameItem in self._getFrameListItems():
-                frameItem.updateText()
+            for frame_item in self._get_frame_list_items():
+                frame_item.update_text()
 
-    def setRushPoint(self):
+    def set_rush_point(self):
         item: AnimFrameItem = self.ui.animationFrameList.currentItem()
-        if item and self.currentAnimGroup:
+        if item and self.current_anim_group:
             idx = self.ui.animationFrameList.row(item)
-            if self.currentAnimGroup.rushFrame != idx:
-                self.currentAnimGroup.rushFrame = idx
-            elif self.currentAnimGroup.rushFrame == idx:
-                self.currentAnimGroup.rushFrame = -1
+            if self.current_anim_group.rush_frame != idx:
+                self.current_anim_group.rush_frame = idx
+            elif self.current_anim_group.rush_frame == idx:
+                self.current_anim_group.rush_frame = -1
 
-            for frameItem in self._getFrameListItems():
-                frameItem.updateText()
+            for frame_item in self._get_frame_list_items():
+                frame_item.update_text()
 
-    def openBatchAdd(self):
+    def open_batch_add(self):
         if not self.newWindow:
             self.newWindow = QtWidgets.QWidget()
             ba = Ui_BatchCreateAction()
             ba.setupUi(self.newWindow)
-            self.batchAddImplem = BatchAddImplementation(self.newWindow, self, ba)
+            self.batch_add_implem = BatchAddImplementation(self.newWindow, self, ba)
             self.newWindow.setWindowTitle("Batch Add Action")
         self.newWindow.show()
 
-    def saveTrim(self):
+    def save_trim(self):
         self.settings.setValue('trim', self.ui.actionTrim_Copies.isChecked())
 
-    def saveCollapse(self):
+    def save_collapse(self):
         self.settings.setValue('collapse', self.ui.actionCollapse_Singles.isChecked())
 
-    def defaultFrameClick(self):
-        if self.currentSequence:
+    def default_frame_click(self):
+        if self.current_sequence:
             item: AnimFrameItem = self.ui.animationFrameList.currentItem()
             if item:
-                selectedAnimFrame: AnimFrame = item.animFrame
-                defaultData = selectedAnimFrame.defaultCopy
+                selected_anim_frame: AnimFrame = item.anim_frame
+                default_data = selected_anim_frame.default_copy
 
-                selectedAnimFrame.frameIndex = defaultData.frameIndex
-                selectedAnimFrame.flip = defaultData.flip
-                selectedAnimFrame.duration = defaultData.duration
-                selectedAnimFrame.shadowOffset = Offset(defaultData.shadowOffset.x, defaultData.shadowOffset.y)
-                selectedAnimFrame.spriteOffset = Offset(defaultData.spriteOffset.x, defaultData.spriteOffset.y)
+                selected_anim_frame.frame_index = default_data.frame_index
+                selected_anim_frame.flip = default_data.flip
+                selected_anim_frame.duration = default_data.duration
+                selected_anim_frame.shadow_offset = Offset(default_data.shadow_offset.x, default_data.shadow_offset.y)
+                selected_anim_frame.sprite_offset = Offset(default_data.sprite_offset.x, default_data.sprite_offset.y)
 
-                item.updateText()
+                item.update_text()
 
                 if not self.animating:
-                    self.setAnimFrameValues(selectedAnimFrame)
+                    self.set_anim_frame_values(selected_anim_frame)
 
-                    self.setAnimation()
+                    self.set_animation()
 
-    def saveActionTrigger(self):
-        if self.loadedTree:
-            self._saveFrameData()
+    def save_action_trigger(self):
+        if self.loaded_tree:
+            self._save_document(self.file_name)
 
-    def saveAsActionTrigger(self):
-        if self.loadedTree:
-            fileName, _ = QFileDialog.getSaveFileName(self.window, "Save Animation File", "",
-                                                      "Animation File (FrameData.xml, *.xml)")
+    def save_as_action_trigger(self):
+        if self.loaded_tree:
+            label = self.sheet_format.value
+            file_name, _ = QFileDialog.getSaveFileName(self.window, f"Save {label}", self.file_name,
+                                                      f"{label} data (*.xml)")
+            if file_name:
+                self._save_document(file_name)
 
-            self._saveFrameData(fileName)
+    def _save_document(self, file_name):
+        if not file_name:
+            return False
+        target = pathlib.Path(file_name)
+        other = SheetFormat.MULTI if self.sheet_format == SheetFormat.SINGLE else SheetFormat.SINGLE
+        if target.name.casefold() == other.value.casefold():
+            self.create_error_popup(f"Use Export to {other.value} to convert this animation.")
+            return False
+        if not self._export_bundle(target.parent, self.sheet_format, target.name):
+            return False
+        self.file_name = str(target)
+        self.loaded_tree = ElementTree.parse(target)
+        self.shadow_size_present = self.loaded_tree.getroot().find('ShadowSize') is not None
+        self.loaded_shadow_size = self.shadow_size
+        for item in self._get_action_list_items():
+            item.anim_group.modified = False
+            item.update_text()
+        for group in self.groups:
+            for sequence in group.directions:
+                for frame in sequence.frames:
+                    frame.reset()
+        self.add_recent_list(self.file_name)
+        return True
 
-    def _saveFrameData(self, fileName=None):
+    def _append_shadow_size(self, root):
+        if self.shadow_size_present or self.shadow_size != self.loaded_shadow_size:
+            ElementTree.SubElement(root, 'ShadowSize').text = str(self.shadow_size)
+
+    def _save_frame_data(self, file_name=None):
+        validate_export(self, SheetFormat.SINGLE)
         collapse = self.ui.actionCollapse_Singles.isChecked()
-        existingRoot = self.loadedTree.getroot()
 
         root = ElementTree.Element("AnimData")
 
-        ElementTree.SubElement(root, "FrameWidth").text = str(self.frameWidth)
-        ElementTree.SubElement(root, "FrameHeight").text = str(self.frameHeight)
-        ElementTree.SubElement(root, "ShadowSize").text = str(self.shadowSize)
+        ElementTree.SubElement(root, "FrameWidth").text = str(self.frame_width)
+        ElementTree.SubElement(root, "FrameHeight").text = str(self.frame_height)
+        self._append_shadow_size(root)
 
-        animsEl = ElementTree.SubElement(root, "Anims")
+        anims_el = ElementTree.SubElement(root, "Anims")
 
         trim = self.ui.actionTrim_Copies.isChecked()
 
-        for groupAnim in self.groups:
-            animEl = ElementTree.SubElement(animsEl, "Anim")
-            if self.createBaseAnimGroupXML(animEl, groupAnim.name, groupAnim.idx, groupAnim, trim=trim,
-                                           copyName=groupAnim.copyName):
-                self.createSingleSheetFrameData(animEl, groupAnim, collapse)
+        for group_anim in self.groups:
+            anim_el = ElementTree.SubElement(anims_el, "Anim")
+            if self.create_base_anim_group_xml(anim_el, group_anim.name, group_anim.idx, group_anim, trim=trim,
+                                           copy_name=group_anim.copy_name, allow_copy_chains=True):
+                self.create_single_sheet_frame_data(anim_el, group_anim, collapse)
 
         ElementTree.indent(root)
 
-        if not fileName:
+        if not file_name:
             # Use loaded file name
-            fileName = self.fileName
+            file_name = self.file_name
 
             # Reset saves.
-            for item in self._getActionListItems():
-                item.animGroup.modified = False
-                item.updateText()
+            for item in self._get_action_list_items():
+                item.anim_group.modified = False
+                item.update_text()
 
         tree = ElementTree.ElementTree(root)
-        tree.write(fileName, encoding='utf-8', xml_declaration=True)
+        tree.write(file_name, encoding='utf-8', xml_declaration=True)
 
-    def isSequenceCollapsable(self, animGroup: AnimGroup):
+    def is_sequence_collapsable(self, anim_group: AnimGroup):
         ct = 0
-        first = animGroup.directions[0].frames
-        for direction in animGroup.directions:
+        first = anim_group.directions[0].frames
+        for direction in anim_group.directions:
             if direction.frames == first:
                 ct += 1
 
@@ -721,244 +811,259 @@ class AnimationEditor:
 
         return False
 
-    def _canTrimCopy(self, group: AnimGroup, copyName=None):
-        copyName = group.copyName if copyName is None else copyName
-        source = next((candidate for candidate in self.groups if candidate.name == copyName), None)
+    def _can_trim_copy(self, group: AnimGroup, copy_name=None):
+        copy_name = group.copy_name if copy_name is None else copy_name
+        source = next((candidate for candidate in self.groups if candidate.name == copy_name), None)
         if source is None:
             return False
-        return (group.rushFrame, group.hitFrame, group.returnFrame, group.directions) == (
-            source.rushFrame, source.hitFrame, source.returnFrame, source.directions)
+        return (group.rush_frame, group.hit_frame, group.return_frame, group.directions) == (
+            source.rush_frame, source.hit_frame, source.return_frame, source.directions)
 
-    def createBaseAnimGroupXML(self, animEl: ElementTree.Element, name: str, index: int, group: AnimGroup,
-                               trim=False, copyName="", size=None) -> bool:
-        ElementTree.SubElement(animEl, "Name").text = name
+    def _copy_target(self, group, copy_name):
+        """Serialize a direct copy of a matching, fully written source."""
+        target = next((item for item in self.groups if item.name == copy_name), None)
+        seen = {group.name}
+        while target is not None:
+            if target.name in seen or not self._can_trim_copy(group, target.name):
+                return ''
+            seen.add(target.name)
+            if not target.copy_name or not self._can_trim_copy(target):
+                return target.name
+            target = next((item for item in self.groups if item.name == target.copy_name), None)
+        return ''
+
+    def create_base_anim_group_xml(self, anim_el: ElementTree.Element, name: str, index: int, group: AnimGroup,
+                               trim=False, copy_name="", size=None, allow_copy_chains=False) -> bool:
+        ElementTree.SubElement(anim_el, "Name").text = name
 
         if index != -1:
-            ElementTree.SubElement(animEl, "Index").text = str(index)
+            ElementTree.SubElement(anim_el, "Index").text = str(index)
 
         if trim:
-            if copyName and self._canTrimCopy(group, copyName):
-                ElementTree.SubElement(animEl, "CopyOf").text = str(copyName)
+            target = (copy_name if allow_copy_chains and self._can_trim_copy(group, copy_name)
+                      else self._copy_target(group, copy_name))
+            if target:
+                ElementTree.SubElement(anim_el, "CopyOf").text = target
                 return False
 
         if size:
-            ElementTree.SubElement(animEl, "FrameWidth").text = str(size[0])
-            ElementTree.SubElement(animEl, "FrameHeight").text = str(size[1])
+            ElementTree.SubElement(anim_el, "FrameWidth").text = str(size[0])
+            ElementTree.SubElement(anim_el, "FrameHeight").text = str(size[1])
 
-        if group.rushFrame != -1:
-            ElementTree.SubElement(animEl, "RushFrame").text = str(group.rushFrame)
+        if group.rush_frame != -1:
+            ElementTree.SubElement(anim_el, "RushFrame").text = str(group.rush_frame)
 
-        if group.hitFrame != -1:
-            ElementTree.SubElement(animEl, "HitFrame").text = str(group.hitFrame)
+        if group.hit_frame != -1:
+            ElementTree.SubElement(anim_el, "HitFrame").text = str(group.hit_frame)
 
-        if group.returnFrame != -1:
-            ElementTree.SubElement(animEl, "ReturnFrame").text = str(group.returnFrame)
+        if group.return_frame != -1:
+            ElementTree.SubElement(anim_el, "ReturnFrame").text = str(group.return_frame)
 
         return True
 
-    def createSingleSheetFrameData(self, animEl: ElementTree.Element, group: AnimGroup, collapse):
-        sequencesEle = ElementTree.SubElement(animEl, "Sequences")
+    def create_single_sheet_frame_data(self, anim_el: ElementTree.Element, group: AnimGroup, collapse):
+        sequences_ele = ElementTree.SubElement(anim_el, "Sequences")
 
-        isCollapsable = False
+        is_collapsable = False
         if collapse:
-            isCollapsable = self.isSequenceCollapsable(group)
+            is_collapsable = self.is_sequence_collapsable(group)
 
         for sequence in group.directions:
-            seqEle = ElementTree.SubElement(sequencesEle, "AnimSequence")
+            seq_ele = ElementTree.SubElement(sequences_ele, "AnimSequence")
 
             for frame in sequence.frames:
-                frameEle = ElementTree.SubElement(seqEle, "AnimFrame")
+                frame_ele = ElementTree.SubElement(seq_ele, "AnimFrame")
 
-                ElementTree.SubElement(frameEle, "FrameIndex").text = str(frame.frameIndex)
-                ElementTree.SubElement(frameEle, "Duration").text = str(frame.duration)
-                ElementTree.SubElement(frameEle, "HFlip").text = str(int(frame.flip))
-                spriteOff = ElementTree.SubElement(frameEle, "Sprite")
-                ElementTree.SubElement(spriteOff, "XOffset").text = str(frame.spriteOffset.x)
-                ElementTree.SubElement(spriteOff, "YOffset").text = str(frame.spriteOffset.y)
-                shadowOff = ElementTree.SubElement(frameEle, "Shadow")
-                ElementTree.SubElement(shadowOff, "XOffset").text = str(frame.shadowOffset.x)
-                ElementTree.SubElement(shadowOff, "YOffset").text = str(frame.shadowOffset.y)
+                ElementTree.SubElement(frame_ele, "FrameIndex").text = str(frame.frame_index)
+                ElementTree.SubElement(frame_ele, "Duration").text = str(frame.duration)
+                ElementTree.SubElement(frame_ele, "HFlip").text = str(int(frame.flip))
+                sprite_off = ElementTree.SubElement(frame_ele, "Sprite")
+                ElementTree.SubElement(sprite_off, "XOffset").text = str(frame.sprite_offset.x)
+                ElementTree.SubElement(sprite_off, "YOffset").text = str(frame.sprite_offset.y)
+                shadow_off = ElementTree.SubElement(frame_ele, "Shadow")
+                ElementTree.SubElement(shadow_off, "XOffset").text = str(frame.shadow_offset.x)
+                ElementTree.SubElement(shadow_off, "YOffset").text = str(frame.shadow_offset.y)
 
             # Stop after writing a frame if we are collapsing it.
-            if isCollapsable:
+            if is_collapsable:
                 break
 
         return True
 
-    def createErrorPopup(self, text: str):
+    def create_error_popup(self, text: str):
         return QtWidgets.QMessageBox.critical(self.window, 'Error', text, QtWidgets.QMessageBox.StandardButton.Ok)
 
-    def _getFrameUniformity(self, group: AnimGroup) -> Union[Set[Tuple], Literal[False]]:
-        uniformDurations: Set[Tuple] = set()
+    def _get_frame_uniformity(self, group: AnimGroup) -> Union[Set[Tuple], Literal[False]]:
+        uniform_durations: Set[Tuple] = set()
         for sequence in group.directions:
             durations = tuple([frame.duration for frame in sequence.frames])
             if not durations:  # Ignore empty sequences?
                 continue
 
-            uniformDurations.add(durations)
+            uniform_durations.add(durations)
 
-            if len(uniformDurations) > 1:
+            if len(uniform_durations) > 1:
                 # Check if frame count differs between directions.
-                firstLength = len(next(iter(uniformDurations), ()))
-                for t in uniformDurations:
-                    if len(t) != firstLength:
-                        sFrameCount = ""
+                first_length = len(next(iter(uniform_durations), ()))
+                for t in uniform_durations:
+                    if len(t) != first_length:
+                        s_frame_count = ""
                         for idx, subseq in enumerate(group.directions):
-                            sFrameCount += f"{FD_STR[idx]}: {len(subseq.frames)} Frames\n"
-                        self.createErrorPopup(
+                            s_frame_count += f"{FD_STR[idx]}: {len(subseq.frames)} Frames\n"
+                        self.create_error_popup(
                             f"Could not save AnimData.xml. All directions for animation {group.name} must all be the "
-                            f"same number of frames.\n{sFrameCount}")
+                            f"same number of frames.\n{s_frame_count}")
                         return False
 
-                sDurations = ""
+                s_durations = ""
                 for idx, sequence2 in enumerate(group.directions):
-                    frameDurations = [fr.duration for fr in sequence2.frames]
-                    sDurations += f"{FD_STR[idx]}: {tuple(frameDurations)} - Total: ({sum(frameDurations)})\n"
+                    frame_durations = [fr.duration for fr in sequence2.frames]
+                    s_durations += f"{FD_STR[idx]}: {tuple(frame_durations)} - Total: ({sum(frame_durations)})\n"
 
                 # If frame counts are fine, then the durations are messed up.
-                self.createErrorPopup(
+                self.create_error_popup(
                     f"Could not save AnimData.xml. Duration values for {group.name} must match for all directions for "
-                    f"each frame.\n{sDurations}")
+                    f"each frame.\n{s_durations}")
                 return False
 
-        return uniformDurations
+        return uniform_durations
 
-    def createMultiSheetFrameData(self, animEl: ElementTree.Element, group: AnimGroup):
+    def create_multi_sheet_frame_data(self, anim_el: ElementTree.Element, group: AnimGroup):
         """This essentially just includes the durations of each frame. Limited in that durations are set for the whole
         animation regardless of direction."""
-        uniformDurations = self._getFrameUniformity(group)
-        if not uniformDurations:
+        uniform_durations = self._get_frame_uniformity(group)
+        if not uniform_durations:
             return False
 
-        durationEle = ElementTree.SubElement(animEl, "Durations")
+        duration_ele = ElementTree.SubElement(anim_el, "Durations")
 
-        for durations in uniformDurations:
+        for durations in uniform_durations:
             for value in durations:
-                ElementTree.SubElement(durationEle, "Duration").text = str(value)
+                ElementTree.SubElement(duration_ele, "Duration").text = str(value)
 
         return True
 
-    def frameIndexChanged(self):
+    def frame_index_changed(self):
         item: AnimFrameItem = self.ui.animationFrameList.currentItem()
         if item:
             idx = self.ui.frameIndexSpinBox.value()
-            clampedIdx = clamp(idx, 0, len(self.imageGrid) - 1)
+            clamped_idx = clamp(idx, 0, len(self.image_grid) - 1)
 
-            if item.animFrame.frameIndex != clampedIdx:
-                item.animFrame.frameIndex = clampedIdx
+            if item.anim_frame.frame_index != clamped_idx:
+                item.anim_frame.frame_index = clamped_idx
 
-                item.updateText()
+                item.update_text()
 
-                self._notifyChanges()
+                self._notify_changes()
 
                 if not self.animating:
                     self.openGLWidget.makeCurrent()
 
-                    self._setAnimFrameDisplay(item.animFrame)
+                    self._set_anim_frame_display(item.anim_frame)
 
-    def _moveFrame(self, rowDir: int):
-        currentPos = self.ui.animationFrameList.currentRow()
-        if rowDir < 0 and currentPos == 0:
+    def _move_frame(self, row_dir: int):
+        current_pos = self.ui.animationFrameList.currentRow()
+        if row_dir < 0 and current_pos == 0:
             return
 
-        if rowDir > 0 and currentPos == self.ui.animationFrameList.count() - 1:
+        if row_dir > 0 and current_pos == self.ui.animationFrameList.count() - 1:
             return
 
-        newPos = currentPos + rowDir
+        new_pos = current_pos + row_dir
 
-        item = self.ui.animationFrameList.takeItem(currentPos)
-        self.ui.animationFrameList.insertItem(newPos, item)
+        item = self.ui.animationFrameList.takeItem(current_pos)
+        self.ui.animationFrameList.insertItem(new_pos, item)
 
-        swapItem = self.ui.animationFrameList.item(currentPos)
-        newItem = self.ui.animationFrameList.item(newPos)
+        swap_item = self.ui.animationFrameList.item(current_pos)
+        new_item = self.ui.animationFrameList.item(new_pos)
 
         # Swap position and indexes.
-        self.currentSequence.frames[currentPos], self.currentSequence.frames[newPos] = self.currentSequence.frames[
-            newPos], self.currentSequence.frames[currentPos]
-        newItem.animFrame.idx, swapItem.animFrame.idx = swapItem.animFrame.idx, newItem.animFrame.idx
+        self.current_sequence.frames[current_pos], self.current_sequence.frames[new_pos] = self.current_sequence.frames[
+            new_pos], self.current_sequence.frames[current_pos]
+        new_item.anim_frame.idx, swap_item.anim_frame.idx = swap_item.anim_frame.idx, new_item.anim_frame.idx
 
-        self.clearCopyGroup()
+        self.clear_copy_group()
 
-        self.ui.frameSlider.setValue(item.animFrame.idx)
-        self.ui.animationFrameList.setCurrentRow(newPos)
+        self.ui.frameSlider.setValue(item.anim_frame.idx)
+        self.ui.animationFrameList.setCurrentRow(new_pos)
 
-    def clearCopyGroup(self):
-        self.currentAnimGroup.copyName = ""
+    def clear_copy_group(self):
+        self.current_anim_group.copy_name = ""
 
-    def copySequence(self):
-        if self.currentSequence:
-            self.copiedSequence = copy.deepcopy(self.currentSequence)
+    def copy_sequence(self):
+        if self.current_sequence:
+            self.copied_sequence = copy.deepcopy(self.current_sequence)
 
-    def pasteSequence(self):
-        if self.currentSequence:
-            if self.copiedSequence:
-                self.currentSequence = self.copiedSequence
-                self.currentAnimGroup.directions[self.currentDirection] = self.copiedSequence
-                self.currentAnimFrame = self.copiedSequence.frames[0]
-                self.copiedSequence = None
-                self.setSequenceList()
+    def paste_sequence(self):
+        if self.current_sequence:
+            if self.copied_sequence:
+                self.current_sequence = self.copied_sequence
+                self.current_anim_group.directions[self.current_direction] = self.copied_sequence
+                self.current_anim_frame = self.copied_sequence.frames[0]
+                self.copied_sequence = None
+                self.set_sequence_list()
                 self.ui.animationFrameList.setCurrentRow(0)
-                self.setAnimFrameValues(self.currentAnimFrame)
+                self.set_anim_frame_values(self.current_anim_frame)
 
-    def moveFrameUp(self):
+    def move_frame_up(self):
         item: AnimFrameItem = self.ui.animationFrameList.currentItem()
         if item:
-            self._moveFrame(-1)
+            self._move_frame(-1)
 
-    def moveFrameDown(self):
+    def move_frame_down(self):
         item: AnimFrameItem = self.ui.animationFrameList.currentItem()
         if item:
-            self._moveFrame(1)
+            self._move_frame(1)
 
-    def addRecentList(self, path):
+    def add_recent_list(self, path):
         # Push to top.
         try:
-            self.recentFiles.remove(path)
+            self.recent_files.remove(path)
         except ValueError:
             pass
 
-        self.recentFiles.insert(0, path)
+        self.recent_files.insert(0, path)
 
-        self.recentFiles = self.recentFiles[:self.maxRecent]
+        self.recent_files = self.recent_files[:self.MAX_RECENT]
 
-        self.settings.setValue('recent', self.recentFiles)
+        self.settings.setValue('recent', self.recent_files)
 
-        self._updateRecentActions()
+        self._update_recent_actions()
 
-    def _updateRecentActions(self):
-        recentCount = min(len(self.recentFiles), self.maxRecent)
+    def _update_recent_actions(self):
+        recent_count = min(len(self.recent_files), self.MAX_RECENT)
 
-        for i in range(recentCount):
+        for i in range(recent_count):
             action = self.recentFileActions[i]
-            path = self.recentFiles[i]
+            path = self.recent_files[i]
             action.setText(QFileInfo(path).fileName())
             action.setText(f"{QFileInfo(path).filePath()}")
             action.setVisible(True)
             action.setData(path)
 
-        for m in range(recentCount, self.maxRecent):
+        for m in range(recent_count, self.MAX_RECENT):
             self.recentFileActions[m].setVisible(False)
 
-    def deleteAction(self):
+    def delete_action(self):
         current: AnimGroupItem = self.ui.actionListWidget.currentItem()
 
         if current:
 
             ret = QtWidgets.QMessageBox.question(self.window, '',
-                                                 f"Are you sure you want to delete {current.animGroup.name}?",
+                                                 f"Are you sure you want to delete {current.anim_group.name}?",
                                                  QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
             if ret == QtWidgets.QMessageBox.StandardButton.Yes:
                 row = self.ui.actionListWidget.row(current)
                 taken = self.ui.actionListWidget.takeItem(row)
                 del taken
 
-                pyglet.clock.unschedule(self._playingAnimation)
+                pyglet.clock.unschedule(self._playing_animation)
                 self.animating = False
-                self.currentAnimFrame = None
-                self.currentAnimGroup = None
-                self.currentSequence = None
+                self.current_anim_frame = None
+                self.current_anim_group = None
+                self.current_sequence = None
 
-                self.clearAnimFrame()
+                self.clear_anim_frame()
 
                 if self.sprite:
                     self.sprite.delete()
@@ -968,7 +1073,7 @@ class AnimationEditor:
 
                 self.ui.animationFrameList.clear()
 
-    def duplicateAction(self):
+    def duplicate_action(self):
         current: AnimGroupItem = self.ui.actionListWidget.currentItem()
 
         if not current:
@@ -979,67 +1084,67 @@ class AnimationEditor:
         if not ok:
             return
 
-        indexId, ok = QInputDialog.getText(self.window, 'Duplicate Action',
+        index_id, ok = QInputDialog.getText(self.window, 'Duplicate Action',
                                            'Specify an available index ID. Leave blank to generate one.')
 
         if not ok:
             return
 
         try:
-            indexId = int(indexId)
+            index_id = int(index_id)
         except ValueError:
-            indexId = None
+            index_id = None
 
-        existingGroup: Optional[AnimGroup] = None
+        existing_group: Optional[AnimGroup] = None
         if self.groups and ok and name:
-            selectedGroup = current.animGroup
+            selected_group = current.anim_group
 
             for group in self.groups:
                 if group.name.lower() == name.lower():
-                    existingGroup = group
+                    existing_group = group
                     break
 
             # Replace existing group.
-            if existingGroup:
-                existingGroup.rushFrame = selectedGroup.rushFrame
-                existingGroup.hitFrame = selectedGroup.hitFrame
-                existingGroup.returnFrame = selectedGroup.returnFrame
-                existingGroup.directions = copy.deepcopy(selectedGroup.directions)
+            if existing_group:
+                existing_group.rush_frame = selected_group.rush_frame
+                existing_group.hit_frame = selected_group.hit_frame
+                existing_group.return_frame = selected_group.return_frame
+                existing_group.directions = copy.deepcopy(selected_group.directions)
 
-                for item in self._getActionListItems():
-                    if item.animGroup.name.lower() == name.lower():
-                        item.updateText()
+                for item in self._get_action_list_items():
+                    if item.anim_group.name.lower() == name.lower():
+                        item.update_text()
 
                 self.ui.statusBar.showMessage(f"Action: {name} already existed. It has been replaced.", 5000)
 
             else:
-                if not indexId:
-                    indexId = self.groups[-1].idx + 1
+                if not index_id:
+                    index_id = self.groups[-1].idx + 1
 
-                group = AnimGroup(indexId, name, selectedGroup.rushFrame, selectedGroup.hitFrame,
-                                  selectedGroup.returnFrame, copy.deepcopy(selectedGroup.directions))
-                group.copyName = selectedGroup.name
+                group = AnimGroup(index_id, name, selected_group.rush_frame, selected_group.hit_frame,
+                                  selected_group.return_frame, copy.deepcopy(selected_group.directions))
+                group.copy_name = selected_group.name
                 self.groups.append(group)
                 item = AnimGroupItem(group, self)
                 self.ui.actionListWidget.addItem(item)
 
                 self.ui.statusBar.showMessage(f"Action: {name} created.", 5000)
 
-    def openAddAction(self):
+    def open_add_action(self):
         name, ok = QInputDialog.getText(self.window, 'Create New Action', 'Enter an action name.')
         if not ok:
             return
 
-        indexId, ok = QInputDialog.getText(self.window, 'Create New Action',
+        index_id, ok = QInputDialog.getText(self.window, 'Create New Action',
                                            'Specify an available index ID. Leave blank to generate one.')
 
         if not ok:
             return
 
         try:
-            indexId = int(indexId)
+            index_id = int(index_id)
         except ValueError:
-            indexId = None
+            index_id = None
 
         if self.groups and ok and name:
 
@@ -1048,155 +1153,155 @@ class AnimationEditor:
                     self.ui.statusBar.showMessage(f"Action: {name} already exists.", 5000)
                     return
 
-                if group.idx == indexId:
-                    self.ui.statusBar.showMessage(f"Index ID {indexId} already exists.", 5000)
+                if group.idx == index_id:
+                    self.ui.statusBar.showMessage(f"Index ID {index_id} already exists.", 5000)
                     return
 
-            if indexId is None:
-                indexId = self.groups[-1].idx + 1
+            if index_id is None:
+                index_id = self.groups[-1].idx + 1
 
-            group = AnimGroup(indexId, name)
+            group = AnimGroup(index_id, name)
             self.groups.append(group)
             item = AnimGroupItem(group, self)
             self.ui.actionListWidget.addItem(item)
 
-    def _notifyChanges(self):
+    def _notify_changes(self):
         """Set action as changed if an action has been modified."""
-        if self.currentAnimGroup:
-            for sequences in self.currentAnimGroup.directions:
+        if self.current_anim_group:
+            for sequences in self.current_anim_group.directions:
                 for frame in sequences.frames:
                     if frame.changed:
-                        for item in self._getActionListItems():
-                            if item.animGroup == self.currentAnimGroup:
-                                if self.currentAnimGroup.modified is False:
-                                    self.currentAnimGroup.modified = True
-                                    item.updateText()
+                        for item in self._get_action_list_items():
+                            if item.anim_group == self.current_anim_group:
+                                if self.current_anim_group.modified is False:
+                                    self.current_anim_group.modified = True
+                                    item.update_text()
                                 return
 
-    def changeAnimationSpeed(self):
-        newSpeed = self.animationSpeedSliderValues[self.ui.animationSpeedSlider.value()]
+    def change_animation_speed(self):
+        new_speed = self.ANIMATION_SPEED_SLIDER_VALUES[self.ui.animationSpeedSlider.value()]
 
-        self.animSpeed = (1 / 60.0) / newSpeed
+        self.anim_speed = (1 / 60.0) / new_speed
 
-        self.ui.animationSpeedLabel.setText(f"{newSpeed}x")
+        self.ui.animationSpeedLabel.setText(f"{new_speed}x")
 
-    def durationChanged(self):
-        if self.currentSequence:
+    def duration_changed(self):
+        if self.current_sequence:
             item: AnimFrameItem = self.ui.animationFrameList.currentItem()
             if item:
-                animFrame = item.animFrame
+                anim_frame = item.anim_frame
                 value = self.ui.durationSpinBox.value()
-                animFrame.duration = value
+                anim_frame.duration = value
 
-                self.clearCopyGroup()
+                self.clear_copy_group()
 
-                self._notifyChanges()
+                self._notify_changes()
 
-    def flipChanged(self):
-        if self.currentSequence:
+    def flip_changed(self):
+        if self.current_sequence:
             item: AnimFrameItem = self.ui.animationFrameList.currentItem()
             if item:
-                animFrame = item.animFrame
+                anim_frame = item.anim_frame
                 checked = self.ui.mirroredCheckbox.isChecked()
-                if int(checked) != animFrame.flip:
-                    animFrame.flip = int(checked)
+                if int(checked) != anim_frame.flip:
+                    anim_frame.flip = int(checked)
 
-                    self.clearCopyGroup()
+                    self.clear_copy_group()
 
                     if not self.animating:
-                        self.setAnimation()
+                        self.set_animation()
 
-                    self._notifyChanges()
+                    self._notify_changes()
 
-    def spriteOffsetChanged(self):
-        if self.currentSequence:
+    def sprite_offset_changed(self):
+        if self.current_sequence:
             item: AnimFrameItem = self.ui.animationFrameList.currentItem()
             if item:
-                animFrame = item.animFrame
-                offset = animFrame.spriteOffset
-                xValue = self.ui.xSpinBox.value()
-                yValue = self.ui.ySpinBox.value()
+                anim_frame = item.anim_frame
+                offset = anim_frame.sprite_offset
+                x_value = self.ui.xSpinBox.value()
+                y_value = self.ui.ySpinBox.value()
 
-                if offset.x != xValue or offset.y != yValue:
-                    offset.x = xValue
-                    offset.y = yValue
+                if offset.x != x_value or offset.y != y_value:
+                    offset.x = x_value
+                    offset.y = y_value
 
-                    self.clearCopyGroup()
+                    self.clear_copy_group()
 
                     if not self.animating:
-                        self.setAnimation()
+                        self.set_animation()
 
-                    self._notifyChanges()
+                    self._notify_changes()
 
-    def shadowOffsetChanged(self):
-        if self.currentSequence:
+    def shadow_offset_changed(self):
+        if self.current_sequence:
             item: AnimFrameItem = self.ui.animationFrameList.currentItem()
             if item:
-                animFrame = item.animFrame
-                offset = animFrame.shadowOffset
-                xValue = self.ui.xShadowSpinbox.value()
-                yValue = self.ui.yShadowSpinBox.value()
+                anim_frame = item.anim_frame
+                offset = anim_frame.shadow_offset
+                x_value = self.ui.xShadowSpinbox.value()
+                y_value = self.ui.yShadowSpinBox.value()
 
-                if offset.x != xValue or offset.y != yValue:
-                    offset.x = xValue
-                    offset.y = yValue
+                if offset.x != x_value or offset.y != y_value:
+                    offset.x = x_value
+                    offset.y = y_value
 
-                    self.clearCopyGroup()
+                    self.clear_copy_group()
 
                     if not self.animating:
-                        self.setAnimation()
+                        self.set_animation()
 
-                    self._notifyChanges()
+                    self._notify_changes()
 
-    def duplicateFrame(self):
+    def duplicate_frame(self):
         """Duplicate the selected frame in the Animation Sequence List"""
-        if self.currentSequence:
+        if self.current_sequence:
             item: AnimFrameItem = self.ui.animationFrameList.currentItem()
             if item:
-                selectedAnimFrame: AnimFrame = item.animFrame
-                animIdx = len(self.currentSequence.frames)
-                animFrame = AnimFrame(animIdx, selectedAnimFrame.frameIndex, selectedAnimFrame.flip,
-                                      selectedAnimFrame.duration,
-                                      Offset(selectedAnimFrame.shadowOffset.x, selectedAnimFrame.shadowOffset.y),
-                                      Offset(selectedAnimFrame.spriteOffset.x, selectedAnimFrame.spriteOffset.y))
+                selected_anim_frame: AnimFrame = item.anim_frame
+                anim_idx = len(self.current_sequence.frames)
+                anim_frame = AnimFrame(anim_idx, selected_anim_frame.frame_index, selected_anim_frame.flip,
+                                      selected_anim_frame.duration,
+                                      Offset(selected_anim_frame.shadow_offset.x, selected_anim_frame.shadow_offset.y),
+                                      Offset(selected_anim_frame.sprite_offset.x, selected_anim_frame.sprite_offset.y))
 
-                self.clearCopyGroup()
+                self.clear_copy_group()
 
-                self._notifyChanges()
+                self._notify_changes()
 
-                self._addAnimFrame(animFrame)
+                self._add_anim_frame(anim_frame)
 
-    def deleteSelectedFrames(self):
+    def delete_selected_frames(self):
         """Delete the selected frame in the Animation Sequence List"""
-        if self.currentSequence:
+        if self.current_sequence:
             item: AnimFrameItem = self.ui.animationFrameList.currentItem()
             if item:
-                for frame in list(self.currentSequence.frames):
-                    if frame == item.animFrame:
-                        self.currentSequence.frames.remove(frame)
+                for frame in list(self.current_sequence.frames):
+                    if frame == item.anim_frame:
+                        self.current_sequence.frames.remove(frame)
 
                 self.ui.animationFrameList.takeItem(self.ui.animationFrameList.row(item))
                 del item
 
-                self.clearCopyGroup()
+                self.clear_copy_group()
 
                 # Just use last in list as selection.
-                lastIdx = self.ui.animationFrameList.count() - 1
-                lastItem = self.ui.animationFrameList.item(lastIdx)
-                self.ui.animationFrameList.setCurrentItem(lastItem)
-                self._updateAnimFrameWidgets()
+                last_idx = self.ui.animationFrameList.count() - 1
+                last_item = self.ui.animationFrameList.item(last_idx)
+                self.ui.animationFrameList.setCurrentItem(last_item)
+                self._update_anim_frame_widgets()
 
-    def sliderChange(self):
+    def slider_change(self):
         if not self.animating:
-            if self.currentSequence:
-                if self.currentSequence.frames:
+            if self.current_sequence:
+                if self.current_sequence.frames:
                     self.ui.animationFrameList.setCurrentRow(self.ui.frameSlider.value())
-                    self.currentAnimFrame = self.currentSequence.frames[self.ui.frameSlider.value()]
-                    self.setAnimFrameValues(self.currentAnimFrame)
-                    self.setAnimation()
+                    self.current_anim_frame = self.current_sequence.frames[self.ui.frameSlider.value()]
+                    self.set_anim_frame_values(self.current_anim_frame)
+                    self.set_animation()
 
-    def setDirection(self, direction):
-        if direction == self.currentDirection:
+    def set_direction(self, direction):
+        if direction == self.current_direction:
             self.directionButtons[direction].toggle()
             return
 
@@ -1204,28 +1309,28 @@ class AnimationEditor:
             if button != self.directionButtons[direction]:
                 button.setChecked(False)
 
-        self.currentDirection = direction
+        self.current_direction = direction
 
         self.ui.animationFrameList.clear()
 
-        if self.currentAnimGroup:
-            if self.currentAnimGroup.directions:
-                self.currentSequence = self.currentAnimGroup.directions[self.currentDirection]
+        if self.current_anim_group:
+            if self.current_anim_group.directions:
+                self.current_sequence = self.current_anim_group.directions[self.current_direction]
 
-                if self.currentSequence.frames:
-                    self.currentAnimFrame = self.currentSequence.frames[0]
+                if self.current_sequence.frames:
+                    self.current_anim_frame = self.current_sequence.frames[0]
 
                 if not self.animating:
-                    self.setAnimFrameValues(self.currentAnimFrame)
+                    self.set_anim_frame_values(self.current_anim_frame)
 
-                if self.currentSequence:
-                    self.setSequenceList()
+                if self.current_sequence:
+                    self.set_sequence_list()
 
                 self.ui.animationFrameList.setCurrentRow(0)
 
-    def clearAnimFrame(self):
+    def clear_anim_frame(self):
         """Clears information boxes of the Frame Data."""
-        self.currentAnimFrame = None
+        self.current_anim_frame = None
 
         self.ui.animationFrameList.clear()
 
@@ -1255,161 +1360,165 @@ class AnimationEditor:
         self.ui.xShadowSpinbox.blockSignals(False)
         self.ui.yShadowSpinBox.blockSignals(False)
 
-    def setSequenceList(self):
+    def set_sequence_list(self):
         self.ui.animationFrameList.clear()
 
         duration = 0
-        for animFrame in self.currentSequence.frames:
-            duration += animFrame.duration
-            item = AnimFrameItem(animFrame, self)
+        for anim_frame in self.current_sequence.frames:
+            duration += anim_frame.duration
+            item = AnimFrameItem(anim_frame, self)
             self.ui.animationFrameList.addItem(item)
 
-        self._updateAnimFrameWidgets()
+        self._update_anim_frame_widgets()
 
-    def _updateAnimFrameWidgets(self):
-        self.ui.frameSlider.setMaximum(max(0, len(self.currentSequence.frames) - 1))
+    def _update_anim_frame_widgets(self):
+        self.ui.frameSlider.setMaximum(max(0, len(self.current_sequence.frames) - 1))
         self.ui.frameSlider.setValue(0)
 
-        self.setAnimation()
+        self.set_animation()
 
-    def setAnimFrameValues(self, animFrame):
-        self.ui.frameIndexSpinBox.setValue(animFrame.frameIndex)
+    def set_anim_frame_values(self, anim_frame):
+        self.ui.frameIndexSpinBox.setValue(anim_frame.frame_index)
 
-        self.ui.durationSpinBox.setValue(animFrame.duration)
+        self.ui.durationSpinBox.setValue(anim_frame.duration)
 
-        self.ui.mirroredCheckbox.setChecked(bool(animFrame.flip))
+        self.ui.mirroredCheckbox.setChecked(bool(anim_frame.flip))
 
-        self.setOffsetData(animFrame)
+        self.set_offset_data(anim_frame)
 
-    def setOffsetData(self, animFrame):
-        if animFrame:
+    def set_offset_data(self, anim_frame):
+        if anim_frame:
             self.ui.xSpinBox.blockSignals(True)
             self.ui.ySpinBox.blockSignals(True)
             self.ui.xShadowSpinbox.blockSignals(True)
             self.ui.yShadowSpinBox.blockSignals(True)
 
-            self.ui.xSpinBox.setValue(animFrame.spriteOffset.x)
-            self.ui.ySpinBox.setValue(animFrame.spriteOffset.y)
+            self.ui.xSpinBox.setValue(anim_frame.sprite_offset.x)
+            self.ui.ySpinBox.setValue(anim_frame.sprite_offset.y)
 
-            self.ui.xShadowSpinbox.setValue(animFrame.shadowOffset.x)
-            self.ui.yShadowSpinBox.setValue(animFrame.shadowOffset.y)
+            self.ui.xShadowSpinbox.setValue(anim_frame.shadow_offset.x)
+            self.ui.yShadowSpinBox.setValue(anim_frame.shadow_offset.y)
 
             self.ui.xSpinBox.blockSignals(False)
             self.ui.ySpinBox.blockSignals(False)
             self.ui.xShadowSpinbox.blockSignals(False)
             self.ui.yShadowSpinBox.blockSignals(False)
 
-    def loadRecentFile(self, action):
+    def load_recent_file(self, action):
         if action:
-            path: str = action.data()
+            self.load_animation(action.data())
 
-            # Just hard code this.
-            if "AnimData.xml" in path:
-                self.importMultipleSheets(path)
-            else:
-                self.loadSheet(path)
+    def _load_animation_dialog(self):
+        file_name, _ = QFileDialog.getOpenFileName(self.window, "Select Animation File", "",
+                                                 "Animation File (*.xml)")
+        if file_name:
+            self.load_animation(file_name)
 
-    def _loadAnimationDialog(self):
-        fileName, _ = QFileDialog.getOpenFileName(self.window, "Select Animation File", "",
-                                                  "Animation File (FrameData.xml, AnimData.xml, *.xml)")
+    def load_animation(self, file_name):
+        try:
+            format_name = detect_format(ElementTree.parse(file_name).getroot())
+        except (OSError, ElementTree.ParseError) as error:
+            self.create_error_popup(str(error))
+            return False
+        return self.load_sheet(file_name) if format_name == SheetFormat.SINGLE else self.import_multiple_sheets(file_name)
 
-        if fileName:
-            if 'AnimData.xml' in fileName:
-                self.importMultipleSheets(fileName)
-            else:
-                self.loadSheet(fileName)
-
-    def loadSheet(self, fileName):
-        dirName = os.path.dirname(fileName)
+    def load_sheet(self, file_name):
+        dir_name = os.path.dirname(file_name)
+        try:
+            tree = validate_source(file_name, SheetFormat.SINGLE)
+        except (FormatError, OSError, ElementTree.ParseError) as error:
+            self.create_error_popup(str(error))
+            return False
 
         try:
-            with open(f"{dirName}/Anim.png", 'rb') as image_file:
-                sheetImage = pyglet.image.load(f"{dirName}/Anim.png", file=image_file)
+            with open(f"{dir_name}/Anim.png", 'rb') as image_file:
+                sheet_image = pyglet.image.load(f"{dir_name}/Anim.png", file=image_file)
         except FileNotFoundError:
             self.ui.statusBar.showMessage("Failed to find Anim.png.", 5000)
             return
 
         try:
-            with open(f"{dirName}/Offsets.png", 'rb') as image_file:
-                actionPtImage = pyglet.image.load(f"{dirName}/Offsets.png", file=image_file)
+            with open(f"{dir_name}/Offsets.png", 'rb') as image_file:
+                action_pt_image = pyglet.image.load(f"{dir_name}/Offsets.png", file=image_file)
         except FileNotFoundError:
-            actionPtImage = None
+            action_pt_image = None
             self.ui.statusBar.showMessage("Failed to find Offsets file... skipping.", 5000)
 
         self.clear()
 
-        self.singleLoaded = True
+        self.single_loaded = True
 
-        self.sheetImage = sheetImage  # Do this after clear. Try block above so we don't clear loaded if fail loading.
-        self.actionPtImage = actionPtImage
+        self.sheet_image = sheet_image  # Do this after clear. Try block above so we don't clear loaded if fail loading.
+        self.action_pt_image = action_pt_image
 
-        self._parse(fileName)
+        self._parse(file_name, tree)
 
-        if self.batchAddImplem:
-            self.batchAddImplem.loadedFrameData()
+        if self.batch_add_implem:
+            self.batch_add_implem.loaded_frame_data()
+        return True
 
-    def addNewAnimationFrame(self, frameIdx: int):
+    def add_new_animation_frame(self, frame_idx: int):
         """Create new animation frame in the sequence. Adds to the end."""
-        if self.currentSequence:
-            animIdx = len(self.currentSequence.frames)
-            animFrame = AnimFrame(animIdx, frameIdx)
+        if self.current_sequence:
+            anim_idx = len(self.current_sequence.frames)
+            anim_frame = AnimFrame(anim_idx, frame_idx)
 
-            self._addAnimFrame(animFrame)
+            self._add_anim_frame(anim_frame)
 
-            self.clearCopyGroup()
+            self.clear_copy_group()
 
-            self._notifyChanges()
+            self._notify_changes()
 
-    def _addAnimFrame(self, animFrame: AnimFrame):
-        self.currentSequence.frames.append(animFrame)
+    def _add_anim_frame(self, anim_frame: AnimFrame):
+        self.current_sequence.frames.append(anim_frame)
 
-        item = AnimFrameItem(animFrame, self)
+        item = AnimFrameItem(anim_frame, self)
         self.ui.animationFrameList.addItem(item)
 
-        self._updateAnimFrameWidgets()
+        self._update_anim_frame_widgets()
 
     @staticmethod
-    def adjustOffset(rushFrame: int, frameNum: int, rushOffset: Offset, frameOffset: Offset):
+    def adjust_offset(rush_frame: int, frame_num: int, rush_offset: Offset, frame_offset: Offset):
         """Calculation to truncate rush frames."""
-        if frameNum > rushFrame:
-            diff = frameOffset - rushOffset
+        if frame_num > rush_frame:
+            diff = frame_offset - rush_offset
 
-            final = rushOffset + (diff // 3)
+            final = rush_offset + (diff // 3)
             return final
 
-    def _addFramesFromGrid(self):
-        self.ui.frameIndexSpinBox.setMaximum(len(self.imageGrid) - 1)
+    def _add_frames_from_grid(self):
+        self.ui.frameIndexSpinBox.setMaximum(len(self.image_grid) - 1)
 
-        for idx, image in enumerate(self.imageGrid):
+        for idx, image in enumerate(self.image_grid):
             image: pyglet.image.ImageDataRegion
             image.anchor_x = image.width // 2
             image.anchor_y = image.height // 2
-            if self.actionPoints:
-                if idx not in self.actionPoints:
+            if self.action_points:
+                if idx not in self.action_points:
                     continue
             item = LoadedSheetFrame(f"Frame {idx}", idx, image, self.ui.sheetFramePicture, self)
             self.ui.loadedSheetFrameList.addItem(item)
 
-    def _parse(self, fileName):
+    def _parse(self, file_name, tree=None):
         try:
-            self.loadedTree = ElementTree.parse(fileName)
+            self.loaded_tree = tree if tree is not None else ElementTree.parse(file_name)
         except ElementTree.ParseError:
             self.ui.statusBar.showMessage("Failed to parse animations XML data.", 5000)
             return
 
-        root = self.loadedTree.getroot()
+        root = self.loaded_tree.getroot()
 
         try:
             width = int(root.find("FrameWidth").text)
             height = int(root.find("FrameHeight").text)
-            shadowSize = int(root.find("ShadowSize").text)
+            shadow_size = integer(root, 'ShadowSize', 1)
         except AttributeError:
             self.ui.statusBar.showMessage("Unable to determine dimensions of XML data.", 5000)
             return
 
-        if self.sheetImage.width % width != 0 or self.sheetImage.height % height != 0:
+        if self.sheet_image.width % width != 0 or self.sheet_image.height % height != 0:
             warning = (f"Sheet is not evenly divisible by frame dimensions.\nImage Dimensions: "
-                       f"{self.sheetImage.width}x{self.sheetImage.height}\nData Dimensions: {width}x{height}\n"
+                       f"{self.sheet_image.width}x{self.sheet_image.height}\nData Dimensions: {width}x{height}\n"
                        f"Images may be cut incorrectly. Continue anyway?")
 
             result = QtWidgets.QMessageBox.warning(self.window, 'Warning', warning,
@@ -1417,88 +1526,89 @@ class AnimationEditor:
             if result == QtWidgets.QMessageBox.StandardButton.No:
                 return
 
-        self.frameWidth = width
-        self.frameHeight = height
-        self.shadowSize = shadowSize
+        self.frame_width = width
+        self.frame_height = height
+        self.shadow_size = shadow_size
+        self.shadow_size_present = root.find('ShadowSize') is not None
+        self.loaded_shadow_size = shadow_size
 
         anims = root.find('Anims')
         if anims is None:
             self.ui.statusBar.showMessage("Unable to find any Animation XML data.", 5000)
             return
 
-        self.imageGrid = TopLeftGrid(self.sheetImage,
-                                     rows=self.sheetImage.height // height,
-                                     columns=self.sheetImage.width // width)
+        self.image_grid = TopLeftGrid(self.sheet_image,
+                                     rows=self.sheet_image.height // height,
+                                     columns=self.sheet_image.width // width)
 
-        if self.actionPtImage:
-            self.actionGrid = TopLeftGrid(self.actionPtImage,
-                                          rows=self.sheetImage.height // height,
-                                          columns=self.sheetImage.width // width)
+        if self.action_pt_image:
+            self.action_grid = TopLeftGrid(self.action_pt_image,
+                                          rows=self.sheet_image.height // height,
+                                          columns=self.sheet_image.width // width)
 
-            actionCenter = self.actionGrid[0].width // 2, self.actionGrid[0].height // 2
-            for idx, actImg in enumerate(self.actionGrid):
-                actImg: pyglet.image.ImageDataRegion
-                actionPointLoc = getActionPointsFromImage(actImg)
+            action_center = self.action_grid[0].width // 2, self.action_grid[0].height // 2
+            for idx, act_img in enumerate(self.action_grid):
+                act_img: pyglet.image.ImageDataRegion
+                action_point_loc = get_action_points_from_image(act_img)
 
-                if actionPointLoc[0] and actionPointLoc[1] and actionPointLoc[2]:
-                    center = actionPointLoc[1]
+                if action_point_loc[0] and action_point_loc[1] and action_point_loc[2]:
+                    center = action_point_loc[1]
                     head = center
-                    if actionPointLoc[3]:
-                        head = actionPointLoc[3]
+                    if action_point_loc[3]:
+                        head = action_point_loc[3]
 
-                    leftHand = actionPointLoc[0]
-                    rightHand = actionPointLoc[2]
+                    left_hand = action_point_loc[0]
+                    right_hand = action_point_loc[2]
 
-                    self.actionPoints[idx] = ActionPoints(leftHand, center, rightHand, head)
+                    self.action_points[idx] = ActionPoints(left_hand, center, right_hand, head)
 
                     # Position relative to 0, 0.
-                    self.actionPoints[idx].add(Offset(-actionCenter[0], -actionCenter[1]))
+                    self.action_points[idx].add(Offset(-action_center[0], -action_center[1]))
 
 
                 else:
-                    self.actionGrid = None
-                    break
+                    continue
 
-        self._addFramesFromGrid()
+        self._add_frames_from_grid()
 
         self.groups = []
         copies = []
-        copyGroups = []
-        for actionAnim in anims:
-            actionIdx = -1
-            rushFrame = -1
-            hitFrame = -1
-            returnFrame = -1
+        copy_groups = []
+        for action_anim in anims:
+            action_idx = -1
+            rush_frame = -1
+            hit_frame = -1
+            return_frame = -1
             sequences = []
-            copyName = ''
-            for actionElement in actionAnim:
-                if actionElement.tag == "Name":
-                    name = actionElement.text
-                elif actionElement.tag == "Index":
-                    actionIdx = int(actionElement.text)
-                elif actionElement.tag == "CopyOf":
-                    copyName = actionElement.text
-                elif actionElement.tag == "RushFrame":
-                    rushFrame = int(actionElement.text)
-                elif actionElement.tag == "HitFrame":
-                    hitFrame = int(actionElement.text)
-                elif actionElement.tag == "ReturnFrame":
-                    returnFrame = int(actionElement.text)
-                elif actionElement.tag == "Sequences":
+            copy_name = ''
+            for action_element in action_anim:
+                if action_element.tag == "Name":
+                    name = action_element.text
+                elif action_element.tag == "Index":
+                    action_idx = int(action_element.text) if action_element.text and action_element.text.strip() else -1
+                elif action_element.tag == "CopyOf":
+                    copy_name = action_element.text
+                elif action_element.tag == "RushFrame":
+                    rush_frame = int(action_element.text) if action_element.text and action_element.text.strip() else -1
+                elif action_element.tag == "HitFrame":
+                    hit_frame = int(action_element.text) if action_element.text and action_element.text.strip() else -1
+                elif action_element.tag == "ReturnFrame":
+                    return_frame = int(action_element.text) if action_element.text and action_element.text.strip() else -1
+                elif action_element.tag == "Sequences":
                     sequences = []
-                    for sequenceElement in actionElement:
-                        frameSeqIdx = 0
+                    for sequence_element in action_element:
+                        frame_seq_idx = 0
                         frames = []
-                        for animSequences in sequenceElement:
-                            for frame in animSequences:
+                        for anim_sequences in sequence_element:
+                            for frame in anim_sequences:
                                 if frame.tag == "FrameIndex":
-                                    frameIndex = int(frame.text)
+                                    frame_index = int(frame.text)
 
                                 elif frame.tag == "Sprite":
-                                    spriteOffset = Offset(*[int(offset.text) for offset in frame])
+                                    sprite_offset = Offset(integer(frame, 'XOffset'), integer(frame, 'YOffset'))
 
                                 elif frame.tag == "Shadow":
-                                    shadowOffset = Offset(*[int(offset.text) for offset in frame])
+                                    shadow_offset = Offset(integer(frame, 'XOffset'), integer(frame, 'YOffset'))
 
                                 elif frame.tag == "HFlip":
                                     try:
@@ -1510,105 +1620,98 @@ class AnimationEditor:
                                     duration = int(frame.text)
 
                             frames.append(
-                                AnimFrame(frameSeqIdx, frameIndex, hflip, duration, shadowOffset, spriteOffset))
-                            frameSeqIdx += 1
+                                AnimFrame(frame_seq_idx, frame_index, hflip, duration, shadow_offset, sprite_offset))
+                            frame_seq_idx += 1
 
                             if REDUCE_RUSH_FRAMES:
-                                if rushFrame > -1:
-                                    frame2 = frameSeqIdx - 1
-                                    # print(frame2, rushFrame, name, frames)
-                                    if frame2 > rushFrame:
+                                if rush_frame > -1:
+                                    frame2 = frame_seq_idx - 1
+                                    # print(frame2, rush_frame, name, frames)
+                                    if frame2 > rush_frame:
                                         # print("NAME", name)
-                                        # print("FRAME!", name, self.adjustOffset(rushFrame, frame2, 
-                                        # frames[rushFrame].spriteOffset, spriteOffset))
+                                        # print("FRAME!", name, self.adjust_offset(rush_frame, frame2, 
+                                        # frames[rush_frame].sprite_offset, sprite_offset))
 
-                                        frames[frame2].spriteOffset = self.adjustOffset(rushFrame, frame2,
-                                                                                        frames[rushFrame].spriteOffset,
-                                                                                        spriteOffset)
-                                        frames[frame2].shadowOffset = self.adjustOffset(rushFrame, frame2,
-                                                                                        frames[rushFrame].shadowOffset,
-                                                                                        shadowOffset)
+                                        frames[frame2].sprite_offset = self.adjust_offset(rush_frame, frame2,
+                                                                                        frames[rush_frame].sprite_offset,
+                                                                                        sprite_offset)
+                                        frames[frame2].shadow_offset = self.adjust_offset(rush_frame, frame2,
+                                                                                        frames[rush_frame].shadow_offset,
+                                                                                        shadow_offset)
 
                         sequence = AnimationSequence(frames)
                         sequences.append(sequence)
 
-            if copyName:
-                group = AnimGroup(actionIdx, name, copyName=copyName)
-                copyGroups.append(group)
+            if copy_name:
+                group = AnimGroup(action_idx, name, copy_name=copy_name)
+                copy_groups.append(group)
             else:
                 if len(sequences) == 1:
                     print(f"Warning: {name} only has 1 sequence. Duplicating for all directions.")
                     for i in range(7):
-                        newSequence = copy.deepcopy(sequences[0])
-                        sequences.append(newSequence)
+                        new_sequence = copy.deepcopy(sequences[0])
+                        sequences.append(new_sequence)
 
                 elif len(sequences) == 0:
                     print(f"Warning: {name} no sequences found. Generating empty sequences.")
                     for i in range(8):
                         sequences.append(AnimationSequence())
 
-                group = AnimGroup(actionIdx, name, rushFrame, hitFrame, returnFrame, sequences)
+                group = AnimGroup(action_idx, name, rush_frame, hit_frame, return_frame, sequences)
             group.width = width
             group.height = height
             self.groups.append(group)
             item = AnimGroupItem(group, self)
             self.ui.actionListWidget.addItem(item)
 
-        # Unfortunately copy actions can come before the action they need to copy? Check after we have parsed all 
-        # actions.
-        # Some copy actions don't even have action indexes... Indexes currently have no use.
-        for groups in copyGroups:
-            name, copyName = groups.name, groups.copyName
-            # Find copy group
-            found = False
-            for currentGroup in self.groups:
-                if currentGroup.name == copyName:
-                    found = currentGroup
-                    break
-
-            if found:
-                # Find destination group.
-                for currentGroup in self.groups:
-                    if currentGroup.name == name:
-                        group = copy.deepcopy(found)
-                        currentGroup.rushFrame = group.rushFrame
-                        currentGroup.hitFrame = group.hitFrame
-                        currentGroup.returnFrame = group.returnFrame
-                        currentGroup.directions = group.directions
-
-            else:
-                print(f"Copy {name} not found")
-                continue
+        self._resolve_copies()
 
         self.ui.statusBar.showMessage("Frame data and images loaded successfully.", 3000)
 
-        self.fileName = fileName
+        self.file_name = file_name
+        self.sheet_format = SheetFormat.SINGLE
+        self.loaded_action_points = copy.deepcopy(self.action_points)
 
-        self.addRecentList(fileName)
+        self.add_recent_list(file_name)
 
-    def _getActionListItems(self) -> List[AnimGroupItem]:
+    def _resolve_copies(self):
+        by_name = {group.name: group for group in self.groups}
+        resolved = set()
+        def resolve(group):
+            if group.name in resolved:
+                return
+            if group.copy_name:
+                source = by_name[group.copy_name]
+                resolve(source)
+                group.rush_frame, group.hit_frame, group.return_frame = source.rush_frame, source.hit_frame, source.return_frame
+                group.directions = copy.deepcopy(source.directions)
+            resolved.add(group.name)
+        for group in self.groups:
+            resolve(group)
+
+    def _get_action_list_items(self) -> List[AnimGroupItem]:
         return [self.ui.actionListWidget.item(x) for x in range(self.ui.actionListWidget.count())]
 
-    def _getFrameListItems(self) -> List[AnimFrameItem]:
+    def _get_frame_list_items(self) -> List[AnimFrameItem]:
         return [self.ui.animationFrameList.item(x) for x in range(self.ui.animationFrameList.count())]
 
     def clear(self):
         """Clear everything so we can load a new sprite."""
-        self.singleLoaded = None
-        self.sheetImage = None
-        self.actionPtImage = None
-        self.imageGrid: Optional[TopLeftGrid] = None
-        self.actionGrid: Optional[TopLeftGrid] = None
-        self.actionPoints.clear()
+        self.single_loaded = None
+        self.sheet_image = None
+        self.action_pt_image = None
+        self.image_grid: Optional[TopLeftGrid] = None
+        self.action_grid: Optional[TopLeftGrid] = None
+        self.action_points.clear()
         self.groups.clear()
 
-        pyglet.clock.unschedule(self._playingAnimation)
+        pyglet.clock.unschedule(self._playing_animation)
         self.animating = False
-        self.currentAnimFrame = None
-        self.currentAnimGroup = None
-        self.currentSequence = None
+        self.current_anim_frame = None
+        self.current_anim_group = None
+        self.current_sequence = None
 
-        self.clearAnimFrame()
+        self.clear_anim_frame()
 
         if self.sprite:
             self.sprite.delete()
@@ -1622,149 +1725,152 @@ class AnimationEditor:
 
         self.ui.sheetFramePicture.clear()
 
-    def getSpritePosition(self):
-        return ((self.openGLWidget.width() // 2) + (self.currentAnimFrame.spriteOffset.x * self.scale),
-                (self.openGLWidget.height() // 3) + (-self.currentAnimFrame.spriteOffset.y * self.scale), 0)
+    def get_sprite_position(self):
+        return ((self.openGLWidget.width() // 2) + (self.current_anim_frame.sprite_offset.x * self.scale),
+                (self.openGLWidget.height() // 3) + (-self.current_anim_frame.sprite_offset.y * self.scale), 0)
 
-    def getShadowPosition(self):
-        return ((self.openGLWidget.width() // 2) + (self.currentAnimFrame.shadowOffset.x * self.scale),
-                (self.openGLWidget.height() // 3) + (-self.currentAnimFrame.shadowOffset.y * self.scale), 0)
+    def get_shadow_position(self):
+        return ((self.openGLWidget.width() // 2) + (self.current_anim_frame.shadow_offset.x * self.scale),
+                (self.openGLWidget.height() // 3) + (-self.current_anim_frame.shadow_offset.y * self.scale), 0)
 
-    def getActionPointPositions(self):
-        ap = self.actionPoints[self.currentAnimFrame.frameIndex]
+    def get_action_point_positions(self):
+        ap = self.action_points[self.current_anim_frame.frame_index]
 
-        if not self.currentAnimFrame.flip:
-            lhPos, cPos, rhPos, headPos = ap.allPos()
+        if not self.current_anim_frame.flip:
+            lh_pos, c_pos, rh_pos, head_pos = ap.all_pos()
         else:
-            lhPos, cPos, rhPos, headPos = ap.allFlipPos()
+            width = self.image_grid[self.current_anim_frame.frame_index].width
+            pivot = width - 1 - 2 * (width // 2)
+            lh_pos, c_pos, rh_pos, head_pos = [Offset(pivot - point.x, point.y) for point in ap.all_pos()]
 
-        lh = ((self.openGLWidget.width() // 2) + ((self.currentAnimFrame.spriteOffset.x + lhPos.x) * self.scale),
-              (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y - lhPos.y) * self.scale), 0)
+        lh = ((self.openGLWidget.width() // 2) + ((self.current_anim_frame.sprite_offset.x + lh_pos.x) * self.scale),
+              (self.openGLWidget.height() // 3) + ((-self.current_anim_frame.sprite_offset.y - lh_pos.y) * self.scale), 0)
 
-        cent = ((self.openGLWidget.width() // 2) + ((self.currentAnimFrame.spriteOffset.x + cPos.x) * self.scale),
-                (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y - cPos.y) * self.scale), 0)
+        cent = ((self.openGLWidget.width() // 2) + ((self.current_anim_frame.sprite_offset.x + c_pos.x) * self.scale),
+                (self.openGLWidget.height() // 3) + ((-self.current_anim_frame.sprite_offset.y - c_pos.y) * self.scale), 0)
 
-        rh = ((self.openGLWidget.width() // 2) + ((self.currentAnimFrame.spriteOffset.x + rhPos.x) * self.scale),
-              (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y - rhPos.y) * self.scale), 0)
+        rh = ((self.openGLWidget.width() // 2) + ((self.current_anim_frame.sprite_offset.x + rh_pos.x) * self.scale),
+              (self.openGLWidget.height() // 3) + ((-self.current_anim_frame.sprite_offset.y - rh_pos.y) * self.scale), 0)
 
-        head = ((self.openGLWidget.width() // 2) + ((self.currentAnimFrame.spriteOffset.x + headPos.x) * self.scale),
-                (self.openGLWidget.height() // 3) + ((-self.currentAnimFrame.spriteOffset.y - headPos.y) * self.scale),
+        head = ((self.openGLWidget.width() // 2) + ((self.current_anim_frame.sprite_offset.x + head_pos.x) * self.scale),
+                (self.openGLWidget.height() // 3) + ((-self.current_anim_frame.sprite_offset.y - head_pos.y) * self.scale),
                 0)
         return lh, cent, rh, head
 
-    def _playingAnimation(self, dt):
+    def _playing_animation(self, dt):
         self.openGLWidget.makeCurrent()
 
-        self._setAnimFrameDisplay(self.currentAnimFrame)
+        self._set_anim_frame_display(self.current_anim_frame)
 
-        self.ui.frameSlider.setValue(self.currentAnimFrame.idx)
+        self.ui.frameSlider.setValue(self.current_anim_frame.idx)
 
-        existingFrame = self.currentAnimFrame
+        existing_frame = self.current_anim_frame
 
-        nextFrame = self.currentAnimFrame.idx + 1
-        if nextFrame > len(self.currentSequence.frames) - 1:
-            nextFrame = 0
+        next_frame = self.current_anim_frame.idx + 1
+        if next_frame > len(self.current_sequence.frames) - 1:
+            next_frame = 0
 
-        self.currentAnimFrame = self.currentSequence.frames[nextFrame]
+        self.current_anim_frame = self.current_sequence.frames[next_frame]
 
-        pyglet.clock.schedule_once(self._playingAnimation, self.animSpeed * existingFrame.duration)
+        pyglet.clock.schedule_once(self._playing_animation, self.anim_speed * existing_frame.duration)
 
-    def playAnimation(self):
-        if self.currentAnimFrame:
+    def play_animation(self):
+        if self.current_anim_frame:
             self.animating = not self.animating
-            pyglet.clock.unschedule(self._playingAnimation)
+            pyglet.clock.unschedule(self._playing_animation)
 
             if self.animating:
-                pyglet.clock.schedule_once(self._playingAnimation, self.animSpeed * self.currentAnimFrame.duration)
+                pyglet.clock.schedule_once(self._playing_animation, self.anim_speed * self.current_anim_frame.duration)
             else:
-                self.sliderChange()
+                self.slider_change()
 
-    def setAnimation(self):
+    def set_animation(self):
         self.openGLWidget.makeCurrent()
 
-        if self.currentAnimGroup:
-            if self.currentAnimGroup.directions[self.currentDirection].frames:
+        if self.current_anim_group:
+            if self.current_anim_group.directions[self.current_direction].frames:
                 if not self.sprite:
-                    spritePos = self.getSpritePosition()
-                    shadowPos = self.getShadowPosition()
+                    sprite_pos = self.get_sprite_position()
+                    shadow_pos = self.get_shadow_position()
 
-                    firstIdx = self.currentAnimGroup.directions[self.currentDirection].frames[0].frameIndex
+                    first_idx = self.current_anim_group.directions[self.current_direction].frames[0].frame_index
 
-                    self.shadow = pyglet.sprite.Sprite(self.shadowImage, x=shadowPos[0], y=shadowPos[1],
+                    self.shadow = pyglet.sprite.Sprite(self._display_shadow_image(), x=shadow_pos[0], y=shadow_pos[1],
                                                        batch=self.openGLWidget.batch, group=pyglet.graphics.Group(0))
                     self.shadow.scale = self.scale
 
-                    self.sprite = pyglet.sprite.Sprite(self.imageGrid[firstIdx], x=spritePos[0], y=spritePos[1],
+                    self.sprite = pyglet.sprite.Sprite(self.image_grid[first_idx], x=sprite_pos[0], y=sprite_pos[1],
                                                        batch=self.openGLWidget.batch, group=pyglet.graphics.Group(1))
                     self.sprite.scale = self.scale
 
-                if not self.leftHand:
-                    if self.actionPoints:
-                        lhPos, centPos, rhPos, headPos = self.getActionPointPositions()
+                if not self.left_hand:
+                    if self.action_points:
+                        lh_pos, cent_pos, rh_pos, head_pos = self.get_action_point_positions()
 
-                        self.leftHand = pyglet.sprite.Sprite(self.actionPointMarker, x=lhPos[0], y=lhPos[1],
+                        self.left_hand = pyglet.sprite.Sprite(self.action_point_marker, x=lh_pos[0], y=lh_pos[1],
                                                              batch=self.openGLWidget.batch,
                                                              group=pyglet.graphics.Group(2))
-                        self.leftHand.color = (255, 0, 0)
-                        self.leftHand.scale = self.scale
+                        self.left_hand.color = (255, 0, 0)
+                        self.left_hand.scale = self.scale
 
-                        self.center = pyglet.sprite.Sprite(self.actionPointMarker, x=centPos[0], y=centPos[1],
+                        self.center = pyglet.sprite.Sprite(self.action_point_marker, x=cent_pos[0], y=cent_pos[1],
                                                            batch=self.openGLWidget.batch,
                                                            group=pyglet.graphics.Group(3))
                         self.center.color = (0, 255, 0)
                         self.center.scale = self.scale
 
-                        self.rightHand = pyglet.sprite.Sprite(self.actionPointMarker, x=rhPos[0], y=rhPos[1],
+                        self.right_hand = pyglet.sprite.Sprite(self.action_point_marker, x=rh_pos[0], y=rh_pos[1],
                                                               batch=self.openGLWidget.batch,
                                                               group=pyglet.graphics.Group(2))
-                        self.rightHand.color = (0, 0, 255)
-                        self.rightHand.scale = self.scale
+                        self.right_hand.color = (0, 0, 255)
+                        self.right_hand.scale = self.scale
 
-                        self.head = pyglet.sprite.Sprite(self.actionPointMarker, x=headPos[0], y=headPos[1],
+                        self.head = pyglet.sprite.Sprite(self.action_point_marker, x=head_pos[0], y=head_pos[1],
                                                          batch=self.openGLWidget.batch, group=pyglet.graphics.Group(2))
                         self.head.color = (0, 0, 0)
                         self.head.scale = self.scale
 
-                        self.apSprites = [self.leftHand, self.center, self.rightHand, self.head]
-                        for sprite in self.apSprites:  # Start them off as invisible.
+                        self.ap_sprites = [self.left_hand, self.center, self.right_hand, self.head]
+                        for sprite in self.ap_sprites:  # Start them off as invisible.
                             sprite.visible = False
 
                 if self.sprite:
-                    animFrame = self.currentAnimFrame if self.currentAnimFrame is not None else \
-                        self.currentAnimGroup.directions[self.currentDirection].frames[0]
+                    anim_frame = self.current_anim_frame if self.current_anim_frame is not None else \
+                        self.current_anim_group.directions[self.current_direction].frames[0]
 
-                    self._setAnimFrameDisplay(animFrame)
+                    self._set_anim_frame_display(anim_frame)
 
-    def _setAnimFrameDisplay(self, animFrame: AnimFrame):
+    def _set_anim_frame_display(self, anim_frame: AnimFrame):
         if self.sprite:
-            image = self.imageGrid[animFrame.frameIndex]
-            if animFrame.flip:
+            image = self.image_grid[anim_frame.frame_index]
+            if anim_frame.flip:
                 image = image.get_texture().get_transform(flip_x=True)
                 image.anchor_x = image.width // 2
                 image.anchor_y = image.height // 2
 
             self.sprite.image = image
 
-            self.sprite.position = self.getSpritePosition()
-            self.shadow.position = self.getShadowPosition()
+            self.sprite.position = self.get_sprite_position()
+            self.shadow.position = self.get_shadow_position()
 
-            if self.leftHand:
-                lhPos, centPos, rhPos, headPos = self.getActionPointPositions()
-                self.leftHand.position = lhPos
-                self.center.position = centPos
-                self.rightHand.position = rhPos
-                self.head.position = headPos
+            if self.left_hand:
+                lh_pos, cent_pos, rh_pos, head_pos = self.get_action_point_positions()
+                self.left_hand.position = lh_pos
+                self.center.position = cent_pos
+                self.right_hand.position = rh_pos
+                self.head.position = head_pos
 
-    def importMultipleSheets(self, fileName):
-        dirName = os.path.dirname(fileName)
+    def import_multiple_sheets(self, file_name):
+        dir_name = os.path.dirname(file_name)
 
         try:
-            self.loadedTree = ElementTree.parse(fileName)
-        except ElementTree.ParseError:
-            self.ui.statusBar.showMessage("Failed to parse animations XML data.", 5000)
-            return
+            tree = validate_source(file_name, SheetFormat.MULTI)
+        except (FormatError, OSError, ElementTree.ParseError) as error:
+            self.create_error_popup(str(error))
+            return False
+        self.loaded_tree = tree
 
-        root = self.loadedTree.getroot()
+        root = self.loaded_tree.getroot()
 
         anims = root.find('Anims')
         if anims is None:
@@ -1772,241 +1878,243 @@ class AnimationEditor:
             return
 
         try:
-            shadowSize = int(root.find("ShadowSize").text)
+            shadow_size = integer(root, 'ShadowSize', 1)
         except AttributeError:
             self.ui.statusBar.showMessage("Unable to determine dimensions of XML data.", 5000)
             return
 
         self.clear()
 
-        self.singleLoaded = False
+        self.single_loaded = False
 
         self.ui.statusBar.showMessage("Processing... this may take a moment.", 5000)
 
         self.app.processEvents()
 
         self.groups = []
-        copyGroups = []
-        collapsedAnims = []
-        maxWidth = 0
-        maxHeight = 0
+        copy_groups = []
+        collapsed_anims = []
+        max_width = 0
+        max_height = 0
         frames = []
-        framesToSequence = []
-        for actionAnim in anims:
+        frames_to_sequence = []
+        for action_anim in anims:
             name = "Unknown"
-            actionIdx = -1
-            rushFrame = -1
-            hitFrame = -1
-            returnFrame = -1
-            copyName = ''
-            frameHeight = 0
-            frameWidth = 0
+            action_idx = -1
+            rush_frame = -1
+            hit_frame = -1
+            return_frame = -1
+            copy_name = ''
+            frame_height = 0
+            frame_width = 0
             durations = []
-            for actionElement in actionAnim:
-                if actionElement.tag == "Name":
-                    name = actionElement.text
-                elif actionElement.tag == "Index":
-                    actionIdx = int(actionElement.text)
-                elif actionElement.tag == "CopyOf":
-                    copyName = actionElement.text
-                elif actionElement.tag == "RushFrame":
-                    rushFrame = int(actionElement.text)
-                elif actionElement.tag == "HitFrame":
-                    hitFrame = int(actionElement.text)
-                elif actionElement.tag == "ReturnFrame":
-                    returnFrame = int(actionElement.text)
-                elif actionElement.tag == "FrameWidth":
-                    frameWidth = int(actionElement.text)
-                elif actionElement.tag == "FrameHeight":
-                    frameHeight = int(actionElement.text)
-                elif actionElement.tag == "Durations":
+            for action_element in action_anim:
+                if action_element.tag == "Name":
+                    name = action_element.text
+                elif action_element.tag == "Index":
+                    action_idx = int(action_element.text) if action_element.text and action_element.text.strip() else -1
+                elif action_element.tag == "CopyOf":
+                    copy_name = action_element.text
+                elif action_element.tag == "RushFrame":
+                    rush_frame = int(action_element.text) if action_element.text and action_element.text.strip() else -1
+                elif action_element.tag == "HitFrame":
+                    hit_frame = int(action_element.text) if action_element.text and action_element.text.strip() else -1
+                elif action_element.tag == "ReturnFrame":
+                    return_frame = int(action_element.text) if action_element.text and action_element.text.strip() else -1
+                elif action_element.tag == "FrameWidth":
+                    frame_width = int(action_element.text)
+                elif action_element.tag == "FrameHeight":
+                    frame_height = int(action_element.text)
+                elif action_element.tag == "Durations":
                     durations = []
-                    for durationElement in actionElement:
+                    for duration_element in action_element:
                         try:
-                            durationValue = int(durationElement.text)
+                            duration_value = int(duration_element.text)
                         except ValueError:
-                            return self.createErrorPopup(
-                                f"{name} animation has an invalid duration value. Cannot be {durationElement.text}")
+                            return self.create_error_popup(
+                                f"{name} animation has an invalid duration value. Cannot be {duration_element.text}")
 
-                        if durationValue <= 0:
-                            return self.createErrorPopup(
-                                f"{name} animation has invalid duration value. Cannot be {durationValue}")
+                        if duration_value <= 0:
+                            return self.create_error_popup(
+                                f"{name} animation has invalid duration value. Cannot be {duration_value}")
 
-                        durations.append(durationValue)
+                        durations.append(duration_value)
 
             # After all checks, lets create some data.
-            if copyName:
-                group = AnimGroup(actionIdx, name, copyName=copyName)
-                copyGroups.append(group)
+            if copy_name:
+                group = AnimGroup(action_idx, name, copy_name=copy_name)
+                copy_groups.append(group)
                 self.groups.append(group)
                 item = AnimGroupItem(group, self)
                 self.ui.actionListWidget.addItem(item)
                 continue
 
-            animFile = f"{name}-Anim.png"
-            animImagePath = os.path.join(dirName, animFile)
-            if not os.path.exists(animImagePath):
-                return self.createErrorPopup(f"{animFile} not found.")
+            anim_file = f"{name}-Anim.png"
+            anim_image_path = os.path.join(dir_name, anim_file)
+            if not os.path.exists(anim_image_path):
+                return self.create_error_popup(f"{anim_file} not found.")
 
-            offsetFile = f"{name}-Offsets.png"
-            offsetImagePath = os.path.join(dirName, offsetFile)
-            if not os.path.exists(animImagePath):
-                return self.createErrorPopup(f"{offsetFile} not found.")
+            offset_file = f"{name}-Offsets.png"
+            offset_image_path = os.path.join(dir_name, offset_file)
+            if not os.path.exists(offset_image_path):
+                return self.create_error_popup(f"{offset_file} not found.")
 
-            shadowFile = f"{name}-Shadow.png"
-            shadowImagePath = os.path.join(dirName, shadowFile)
-            if not os.path.exists(animImagePath):
-                return self.createErrorPopup(f"{shadowFile} not found.")
+            shadow_file = f"{name}-Shadow.png"
+            shadow_image_path = os.path.join(dir_name, shadow_file)
+            if not os.path.exists(shadow_image_path):
+                return self.create_error_popup(f"{shadow_file} not found.")
 
-            animImage = Image.open(animImagePath)
-            offsetImage = Image.open(offsetImagePath)
-            shadowImage = Image.open(shadowImagePath)
+            with Image.open(anim_image_path) as source_image:
+                anim_image = source_image.convert('RGBA')
+            with Image.open(offset_image_path) as source_image:
+                offset_image = source_image.convert('RGBA')
+            with Image.open(shadow_image_path) as source_image:
+                shadow_image = source_image.convert('RGBA')
 
-            if (shadowImage.width != animImage.width or shadowImage.height != animImage.height or
-                    animImage.width != offsetImage.width or animImage.height != offsetImage.height or
-                    offsetImage.width != animImage.width or offsetImage.height != animImage.height):
-                return self.createErrorPopup(f"Dimensions of Anims, Shadows, and Offsets do not match for {name}.")
+            if (shadow_image.width != anim_image.width or shadow_image.height != anim_image.height or
+                    anim_image.width != offset_image.width or anim_image.height != offset_image.height or
+                    offset_image.width != anim_image.width or offset_image.height != anim_image.height):
+                return self.create_error_popup(f"Dimensions of Anims, Shadows, and Offsets do not match for {name}.")
 
-            if frameWidth == 0 or frameHeight == 0:
-                return self.createErrorPopup(f"Could not find frame dimensions for {name}.")
+            if frame_width == 0 or frame_height == 0:
+                return self.create_error_popup(f"Could not find frame dimensions for {name}.")
 
-            if animImage.width % frameWidth != 0 or animImage.height % frameHeight != 0:
-                return self.createErrorPopup(f"Animation must be divisible by frame dimensions for {name}.")
+            if anim_image.width % frame_width != 0 or anim_image.height % frame_height != 0:
+                return self.create_error_popup(f"Animation must be divisible by frame dimensions for {name}.")
 
-            frameXCount = animImage.width // frameWidth
-            sequenceCount = frameYCount = animImage.height // frameHeight
+            frame_x_count = anim_image.width // frame_width
+            sequence_count = frame_y_count = anim_image.height // frame_height
 
-            if len(durations) != frameXCount:
-                return self.createErrorPopup("Amount of frame duration does not match number of frames.")
+            if len(durations) != frame_x_count:
+                return self.create_error_popup("Amount of frame duration does not match number of frames.")
 
-            if sequenceCount != 1 and sequenceCount != 8:
-                return self.createErrorPopup(f"Frame count is not 1 or 8 for {name}.")
+            if sequence_count != 1 and sequence_count != 8:
+                return self.create_error_popup(f"Frame count is not 1 or 8 for {name}.")
 
-            group = AnimGroup(actionIdx, name, rushFrame, hitFrame, returnFrame)
+            group = AnimGroup(action_idx, name, rush_frame, hit_frame, return_frame)
             self.groups.append(group)
             item = AnimGroupItem(group, self)
             self.ui.actionListWidget.addItem(item)
 
-            for i in range(sequenceCount):
-                sequenceIdx = (sequenceCount - i) % sequenceCount
+            for i in range(sequence_count):
+                sequence_idx = (sequence_count - i) % sequence_count
 
-                for frameIdx in range(frameXCount):
-                    startX, startY = frameIdx % frameXCount, sequenceIdx
-                    l, t = startX * frameWidth, startY * frameHeight
-                    r, b = l + frameWidth, t + frameHeight
+                for frame_idx in range(frame_x_count):
+                    start_x, start_y = frame_idx % frame_x_count, sequence_idx
+                    l, t = start_x * frame_width, start_y * frame_height
+                    r, b = l + frame_width, t + frame_height
 
                     obounds = (l, t, r, b)
 
-                    frameImg = animImage.crop(obounds)
+                    frame_img = anim_image.crop(obounds)
 
-                    oFrameBox = frameImg.getbbox()
-                    if oFrameBox:
-                        croppedFrame = TLRectangle.fromBounds(oFrameBox)
+                    o_frame_box = frame_img.getbbox()
+                    if o_frame_box:
+                        cropped_frame = TLRectangle.from_bounds(o_frame_box)
                     else:
                         # No bounds found, it's possible the frame is empty. For example, an animation may temporarily
                         # make a character disappear/reappear. Create a frame at the center that's 1x1.
-                        croppedFrame = TLRectangle(frameWidth // 2, frameHeight // 2, 1, 1)
-                        oFrameBox = croppedFrame.bounds()
+                        cropped_frame = TLRectangle(frame_width // 2, frame_height // 2, 1, 1)
+                        o_frame_box = cropped_frame.bounds()
 
-                    maxWidth = max(maxWidth, croppedFrame.width)
-                    maxHeight = max(maxHeight, croppedFrame.height)
+                    max_width = max(max_width, cropped_frame.width)
+                    max_height = max(max_height, cropped_frame.height)
 
-                    actionPointFrame = offsetImage.crop(obounds)
+                    action_point_frame = offset_image.crop(obounds)
 
-                    actionPointLoc = getActionPointsFromPILImage(actionPointFrame)
+                    action_point_loc = get_action_points_from_pil_image(action_point_frame)
 
-                    boundsCenter = croppedFrame.center
+                    bounds_center = cropped_frame.center
 
-                    actionPoints = ActionPoints(Offset(*boundsCenter),
-                                                Offset(*boundsCenter),
-                                                Offset(*boundsCenter),
-                                                Offset(*boundsCenter))
+                    action_points = ActionPoints(Offset(*bounds_center),
+                                                Offset(*bounds_center),
+                                                Offset(*bounds_center),
+                                                Offset(*bounds_center))
 
-                    if actionPointLoc[0] and actionPointLoc[1] and actionPointLoc[2]:
-                        center = actionPointLoc[1]
+                    if action_point_loc[0] and action_point_loc[1] and action_point_loc[2]:
+                        center = action_point_loc[1]
                         head = center
-                        if actionPointLoc[3]:
-                            head = actionPointLoc[3]
+                        if action_point_loc[3]:
+                            head = action_point_loc[3]
 
-                        leftHand = actionPointLoc[0]
-                        rightHand = actionPointLoc[2]
-                        actionPoints = ActionPoints(leftHand, center, rightHand, head)
-                    elif actionPointLoc[0] or actionPointLoc[1] or actionPointLoc[2] or actionPointLoc[3]:
-                        return self.createErrorPopup(
-                            f"Error decoding action points from offsets image. Frame Index: {frameIdx}")
+                        left_hand = action_point_loc[0]
+                        right_hand = action_point_loc[2]
+                        action_points = ActionPoints(left_hand, center, right_hand, head)
+                    elif action_point_loc[0] or action_point_loc[1] or action_point_loc[2] or action_point_loc[3]:
+                        return self.create_error_popup(
+                            f"Error decoding action points from offsets image. Frame Index: {frame_idx}")
 
                     # Position relative to 0, 0.
-                    actionPoints.add(Offset(-boundsCenter[0], -boundsCenter[1]))
+                    action_points.add(Offset(-bounds_center[0], -bounds_center[1]))
 
-                    offsetRect = actionPoints.getRect()
-                    cOffsetRect = centerBounds(offsetRect)
+                    offset_rect = action_points.get_rect()
+                    c_offset_rect = center_bounds(offset_rect)
 
-                    maxWidth = max(maxWidth, cOffsetRect.width)
-                    maxHeight = max(maxHeight, cOffsetRect.height)
+                    max_width = max(max_width, c_offset_rect.width)
+                    max_height = max(max_height, c_offset_rect.height)
 
-                    animFrame = AnimFrame(len(group.directions[sequenceIdx].frames))
+                    anim_frame = AnimFrame(len(group.directions[sequence_idx].frames))
 
-                    offsetX = croppedFrame.x - ((frameWidth // 2) - (croppedFrame.width // 2))
-                    offsetY = croppedFrame.y - ((frameHeight // 2) - (croppedFrame.height // 2))
+                    offset_x = cropped_frame.x - ((frame_width // 2) - (cropped_frame.width // 2))
+                    offset_y = cropped_frame.y - ((frame_height // 2) - (cropped_frame.height // 2))
 
-                    animFrame.spriteOffset = Offset(offsetX, offsetY)
-                    animFrame.duration = durations[frameIdx]
+                    anim_frame.sprite_offset = Offset(offset_x, offset_y)
+                    anim_frame.duration = durations[frame_idx]
 
-                    if shadowImage:
-                        simage = shadowImage.crop(obounds)
-
-                        if shadowOffset := getShadowLocationFromPILImage(simage):
-                            animFrame.shadowOffset.x = shadowOffset.x - frameWidth // 2
-                            animFrame.shadowOffset.y = shadowOffset.y - frameHeight // 2
+                    if shadow_image:
+                        simage = shadow_image.crop(obounds)
+                        if shadow_offset := get_shadow_location_from_pil_image(simage):
+                            anim_frame.shadow_offset.x = shadow_offset.x - frame_width // 2
+                            anim_frame.shadow_offset.y = shadow_offset.y - frame_height // 2
                     else:
-                        animFrame.shadowOffset.x = 0
-                        animFrame.shadowOffset.y = -(croppedFrame.y - frameHeight // 2) // 2
+                        anim_frame.shadow_offset.x = 0
+                        anim_frame.shadow_offset.y = -(cropped_frame.y - frame_height // 2) // 2
 
-                    frames.append((frameImg.crop(oFrameBox), actionPoints))
+                    frames.append((frame_img.crop(o_frame_box), action_points))
                     # XML indices are optional and need not uniquely identify a
                     # group. Keep the actual frame instead of looking it up by ID.
-                    framesToSequence.append(animFrame)
-                    group.directions[sequenceIdx].frames.append(animFrame)
+                    frames_to_sequence.append(anim_frame)
+                    group.directions[sequence_idx].frames.append(anim_frame)
 
-            if sequenceCount == 1:
-                collapsedAnims.append(group)
+            if sequence_count == 1:
+                collapsed_anims.append(group)
 
-        maxWidth = roundUpToMult(maxWidth, 2)
-        maxHeight = roundUpToMult(maxHeight, 2)
+        max_width = round_up_to_mult(max_width, 2)
+        max_height = round_up_to_mult(max_height, 2)
 
-        uniqueImages, oldFrameToNewFrame, uniqueBodyPoints = checkDuplicateImages(frames, True)
+        unique_images, old_frame_to_new_frame, unique_body_points = check_duplicate_images(frames, True)
 
-        maxTexSize = int(math.ceil(math.sqrt(len(uniqueImages))))
+        max_tex_size = int(math.ceil(math.sqrt(len(unique_images))))
 
-        singleSheetSize = (maxWidth * maxTexSize, maxHeight * maxTexSize)
+        single_sheet_size = (max_width * max_tex_size, max_height * max_tex_size)
 
         # Create single sheet
-        sheet = Image.new("RGBA", singleSheetSize, (0, 0, 0, 0))
+        sheet = Image.new("RGBA", single_sheet_size, (0, 0, 0, 0))
 
-        apSheet = Image.new("RGBA", singleSheetSize, (0, 0, 0, 0))
+        ap_sheet = Image.new("RGBA", single_sheet_size, (0, 0, 0, 0))
 
-        apDraw = ImageDraw.Draw(apSheet)
+        ap_draw = ImageDraw.Draw(ap_sheet)
 
         # Map the positions of the frames to their sheet positions.
-        for frameIdx, uI in enumerate(uniqueImages):
-            diffX = maxWidth // 2 - uI.width // 2
-            diffY = maxHeight // 2 - uI.height // 2
-            startX = maxWidth * (frameIdx % maxTexSize)
-            startY = (maxHeight * (frameIdx // maxTexSize))
+        for frame_idx, uI in enumerate(unique_images):
+            diff_x = max_width // 2 - uI.width // 2
+            diff_y = max_height // 2 - uI.height // 2
+            start_x = max_width * (frame_idx % max_tex_size)
+            start_y = (max_height * (frame_idx // max_tex_size))
 
-            sheet.paste(uI, (startX + diffX, startY + diffY))
+            sheet.paste(uI, (start_x + diff_x, start_y + diff_y))
 
             # Create an Offset sheet.
-            bpStartX = startX + maxWidth // 2
-            bpStartY = startY + maxHeight // 2
+            bp_start_x = start_x + max_width // 2
+            bp_start_y = start_y + max_height // 2
 
-            startOffset = Offset(bpStartX, bpStartY)
+            start_offset = Offset(bp_start_x, bp_start_y)
 
-            bp = uniqueBodyPoints[frameIdx]
-            lh = (startOffset + bp.leftHand).data()
-            center = (startOffset + bp.center).data()
-            rh = (startOffset + bp.rightHand).data()
-            head = (startOffset + bp.head).data()
+            bp = unique_body_points[frame_idx]
+            lh = (start_offset + bp.left_hand).data()
+            center = (start_offset + bp.center).data()
+            rh = (start_offset + bp.right_hand).data()
+            head = (start_offset + bp.head).data()
 
             positions = defaultdict(list)
             positions[lh].append((255, 0, 0, 255))
@@ -2014,23 +2122,23 @@ class AnimationEditor:
             positions[head].append((0, 0, 0, 255))
             positions[rh].append((0, 0, 255, 255))
 
-            for pos, color in overlapColors(positions).items():
-                apDraw.point(pos, fill=color)
+            for pos, color in overlap_colors(positions).items():
+                ap_draw.point(pos, fill=color)
 
-            self.actionPoints[frameIdx] = uniqueBodyPoints[frameIdx]
+            self.action_points[frame_idx] = unique_body_points[frame_idx]
 
-        flippedFrames = set()
+        flipped_frames = set()
         # Now we need to go through and update the data with the correct frame indexes.
-        for oldId, oldFrame in enumerate(frames):
-            newFrame = framesToSequence[oldId]
-            changedFrame = oldFrameToNewFrame[oldId]
-            newFrame.frameIndex = changedFrame.frameIndex
-            newFrame.flip = changedFrame.flip
+        for old_id, old_frame in enumerate(frames):
+            new_frame = frames_to_sequence[old_id]
+            changed_frame = old_frame_to_new_frame[old_id]
+            new_frame.frame_index = changed_frame.frame_index
+            new_frame.flip = changed_frame.flip
 
-            if newFrame.flip:
-                flippedFrames.add(newFrame.frameIndex)
-                if oldFrame[0].width % 2 == 1:
-                    newFrame.spriteOffset.x += 1
+            if new_frame.flip:
+                flipped_frames.add(new_frame.frame_index)
+                if old_frame[0].width % 2 == 1:
+                    new_frame.sprite_offset.x += 1
 
         # Flip back clockwise.
         for group in self.groups:
@@ -2041,318 +2149,252 @@ class AnimationEditor:
                     frame.reset()
 
         # Now that we have proper frames, copy the collapsed ones to all directions.
-        for collapsedAnim in collapsedAnims:
+        for collapsed_anim in collapsed_anims:
             for si in range(1, 8):
-                newSequence = copy.deepcopy(collapsedAnim.directions[0])
-                collapsedAnim.directions[si] = newSequence
+                new_sequence = copy.deepcopy(collapsed_anim.directions[0])
+                collapsed_anim.directions[si] = new_sequence
 
-        # Unfortunately copy actions can come before the action they need to copy? Check after we have parsed all 
-        # actions.
-        # Some copy actions don't even have action indexes... Indexes currently have no use according to SkyTemple.
-        for groups in copyGroups:
-            name, copyName = groups.name, groups.copyName
-            # Find copy group
-            found = False
-            for currentGroup in self.groups:
-                if currentGroup.name == copyName:
-                    found = currentGroup
-                    break
+        self._resolve_copies()
 
-            if found:
-                # Find destination group.
-                for currentGroup in self.groups:
-                    if currentGroup.name == name:
-                        group = copy.deepcopy(found)
-                        currentGroup.rushFrame = group.rushFrame
-                        currentGroup.hitFrame = group.hitFrame
-                        currentGroup.returnFrame = group.returnFrame
-                        currentGroup.directions = group.directions
-
-            else:
-                print(f"Copy {name} not found")
-                continue
-
-        self.sheetImage = pyglet.image.ImageData(sheet.width, sheet.height, 'RGBA', sheet.tobytes(),
+        self.sheet_image = pyglet.image.ImageData(sheet.width, sheet.height, 'RGBA', sheet.tobytes(),
                                                  pitch=-sheet.width * 4)
 
-        self.frameWidth = maxWidth
-        self.frameHeight = maxHeight
-        self.shadowSize = shadowSize
+        self.frame_width = max_width
+        self.frame_height = max_height
+        self.shadow_size = shadow_size
+        self.shadow_size_present = root.find('ShadowSize') is not None
+        self.loaded_shadow_size = shadow_size
+        self.file_name = str(file_name)
+        self.sheet_format = SheetFormat.MULTI
+        self.loaded_action_points = copy.deepcopy(self.action_points)
 
-        self.actionPtImage = pyglet.image.ImageData(apSheet.width, apSheet.height, 'RGBA', apSheet.tobytes(),
-                                                    pitch=-apSheet.width * 4)
+        self.action_pt_image = pyglet.image.ImageData(ap_sheet.width, ap_sheet.height, 'RGBA', ap_sheet.tobytes(),
+                                                    pitch=-ap_sheet.width * 4)
 
-        self.imageGrid = TopLeftGrid(self.sheetImage,
-                                     rows=maxTexSize,
-                                     columns=maxTexSize)
+        self.image_grid = TopLeftGrid(self.sheet_image,
+                                     rows=max_tex_size,
+                                     columns=max_tex_size)
 
-        self.actionGrid = TopLeftGrid(self.actionPtImage,
-                                      rows=maxTexSize,
-                                      columns=maxTexSize)
+        self.action_grid = TopLeftGrid(self.action_pt_image,
+                                      rows=max_tex_size,
+                                      columns=max_tex_size)
 
-        self._addFramesFromGrid()
+        self._add_frames_from_grid()
 
-        self.addRecentList(fileName)
+        self.add_recent_list(file_name)
 
         self.ui.statusBar.showMessage("Frame data and images loaded successfully.", 3000)
+        return True
 
-    def _saveExportFrameData(self, fileName, frameSizes: dict[str, Tuple[int, int]]):
-        existingRoot = self.loadedTree.getroot()
+    def _save_export_frame_data(self, file_name, frame_sizes: dict[str, Tuple[int, int]]):
 
         root = ElementTree.Element("AnimData")
 
-        ElementTree.SubElement(root, "ShadowSize").text = str(self.shadowSize)
+        self._append_shadow_size(root)
 
-        animsEl = ElementTree.SubElement(root, "Anims")
+        anims_el = ElementTree.SubElement(root, "Anims")
 
         trim = self.ui.actionTrim_Copies.isChecked()
 
-        for groupAnim in self.groups:
-            animEl = ElementTree.SubElement(animsEl, "Anim")
-            size = frameSizes[groupAnim.name] if groupAnim.name in frameSizes else None
-            if self.createBaseAnimGroupXML(animEl, groupAnim.name, groupAnim.idx, groupAnim, trim=trim,
-                                           copyName=groupAnim.copyName, size=size):
-                self.createMultiSheetFrameData(animEl, groupAnim)
+        for group_anim in self.groups:
+            anim_el = ElementTree.SubElement(anims_el, "Anim")
+            size = frame_sizes[group_anim.name] if group_anim.name in frame_sizes else None
+            if self.create_base_anim_group_xml(anim_el, group_anim.name, group_anim.idx, group_anim, trim=trim,
+                                           copy_name=group_anim.copy_name, size=size):
+                self.create_multi_sheet_frame_data(anim_el, group_anim)
 
         ElementTree.indent(root)
 
-        if not fileName:
+        if not file_name:
             # Use loaded file name
-            fileName = self.fileName
+            file_name = self.file_name
 
             # Reset saves.
-            for item in self._getActionListItems():
-                item.animGroup.modified = False
-                item.updateText()
+            for item in self._get_action_list_items():
+                item.anim_group.modified = False
+                item.update_text()
 
         tree = ElementTree.ElementTree(root)
-        tree.write(fileName, encoding='utf-8', xml_declaration=True)
+        tree.write(file_name, encoding='utf-8', xml_declaration=True)
 
-    def exportSingleSheet(self):
-        if self.loadedTree:
+    def export_single_sheet(self):
+        if self.loaded_tree:
             options = QFileDialog.Option.ShowDirsOnly
 
             directory = QFileDialog.getExistingDirectory(self.window, "Select Directory for Single Sheet", "", options)
 
             if directory:
-                self._exportSingleSheet(directory)
+                self._export_single_sheet(directory)
 
-    def _exportSingleSheet(self, directory):
-        self._saveFrameData(f"{directory}/FrameData.xml")
+    def _export_single_sheet(self, directory):
+        return self._export_bundle(directory, SheetFormat.SINGLE)
 
-        with open(f"{directory}/Anim.png", 'wb') as image_file:
-            self.sheetImage.save(f"{directory}/Anim.png", file=image_file)
+    def _export_bundle(self, directory, format_name, xml_name=None):
+        """Validate and render the complete bundle before touching its destination."""
+        directory = pathlib.Path(directory)
+        xml_name = xml_name or format_name.value
+        try:
+            if pathlib.Path(xml_name).suffix.lower() != '.xml':
+                raise FormatError('Animation data must be saved as an XML file.')
+            validate_export(self, format_name)
+            # Staging also catches encoding/layout failures before an overwrite.
+            directory.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix='mdframeedit-export-', dir=directory.parent) as temporary:
+                stage = pathlib.Path(temporary)
+                if format_name == SheetFormat.SINGLE:
+                    self._write_single_sheet(stage)
+                else:
+                    self._write_multiple_sheets(stage)
+                validate_source(stage / format_name.value, format_name)
+                directory.mkdir(parents=True, exist_ok=True)
+                files = sorted(stage.iterdir(), key=lambda path: path.suffix.lower() == '.xml')
+                replacements = [(path, directory / (xml_name if path.name == format_name.value else path.name))
+                                for path in files]
+                if format_name == SheetFormat.SINGLE and not (stage / 'Offsets.png').exists():
+                    replacements.append((None, directory / 'Offsets.png'))
+                backup = stage / 'backup'
+                backup.mkdir()
+                for _, target in replacements:
+                    if target.exists():
+                        shutil.copy2(target, backup / target.name)
+                changed = []
+                try:
+                    for source, target in replacements:
+                        if source is None:
+                            if target.exists():
+                                target.unlink()
+                                changed.append(target)
+                        else:
+                            os.replace(source, target)
+                            changed.append(target)
+                except OSError as write_error:
+                    try:
+                        for target in reversed(changed):
+                            saved = backup / target.name
+                            if saved.exists():
+                                os.replace(saved, target)
+                            else:
+                                target.unlink(missing_ok=True)
+                    except OSError:
+                        rescue = pathlib.Path(tempfile.mkdtemp(prefix='mdframeedit-recovery-', dir=directory.parent))
+                        shutil.copytree(backup, rescue, dirs_exist_ok=True)
+                        raise FormatError(f'Save failed. Original file backups are in {rescue}.') from write_error
+                    raise
+        except (FormatError, OSError, ValueError) as error:
+            self.create_error_popup(str(error))
+            return False
+        message = 'Single sheet' if format_name == SheetFormat.SINGLE else 'Multisheet frames'
+        self.ui.statusBar.showMessage(f'{message} were output successfully.', 3000)
+        return True
 
-        if self.actionPtImage:
-            with open(f"{directory}/Offsets.png", 'wb') as image_file:
-                self.actionPtImage.save(f"{directory}/Offsets.png", file=image_file)
+    def _write_single_sheet(self, directory):
+        self._save_frame_data(str(directory / 'FrameData.xml'))
+        with open(directory / 'Anim.png', 'wb') as output:
+            self.sheet_image.save(str(directory / 'Anim.png'), file=output)
+        changed_points = {index: body for index, body in self.action_points.items()
+                          if body != self.loaded_action_points.get(index)}
+        if changed_points or (self.action_pt_image is None and self.action_points):
+            if self.action_pt_image is None:
+                image = Image.new('RGBA', (self.sheet_image.width, self.sheet_image.height))
+            else:
+                image = Image.frombytes('RGBA', (self.action_pt_image.width, self.action_pt_image.height),
+                    self.action_pt_image.get_image_data().get_data('RGBA', -self.action_pt_image.width * 4))
+            draw = ImageDraw.Draw(image)
+            for index, body in (changed_points or self.action_points).items():
+                x = (index % self.image_grid.columns) * self.frame_width + self.frame_width // 2
+                y = (index // self.image_grid.columns) * self.frame_height + self.frame_height // 2
+                image.paste((0, 0, 0, 0), (x - self.frame_width // 2, y - self.frame_height // 2,
+                                           x - self.frame_width // 2 + self.frame_width,
+                                           y - self.frame_height // 2 + self.frame_height))
+                positions = defaultdict(list)
+                for point, color in zip(body.all_pos(), ((255, 0, 0, 255), (0, 255, 0, 255),
+                                                       (0, 0, 255, 255), (0, 0, 0, 255))):
+                    positions[(x + point.x, y + point.y)].append(color)
+                for position, color in overlap_colors(positions).items():
+                    draw.point(position, color)
+            image.save(directory / 'Offsets.png')
+        elif self.action_pt_image is not None:
+            with open(directory / 'Offsets.png', 'wb') as output:
+                self.action_pt_image.save(str(directory / 'Offsets.png'), file=output)
 
-        self.ui.statusBar.showMessage("Single sheet was output successfully.", 3000)
-
-    def exportMultipleSheets(self):
-        if self.loadedTree:
+    def export_multiple_sheets(self):
+        if self.loaded_tree:
             options = QFileDialog.Option.ShowDirsOnly
 
             directory = QFileDialog.getExistingDirectory(self.window, "Select Directory for Multi-Sheets", "", options)
 
             if directory:
-                self._exportMultipleSheets(directory)
+                self._export_multiple_sheets(directory)
 
-    def _exportMultipleSheets(self, filePath: str):
-        if not self.loadedTree:
-            return
+    def _export_multiple_sheets(self, directory):
+        return self._export_bundle(directory, SheetFormat.MULTI)
 
-        # Check save eligibility first.
-        for animGroup in self.groups:
-            if self._getFrameUniformity(animGroup) is False:
-                return
-
-        baseFrame = self.imageGrid[0]
-        frameWidth, frameHeight = baseFrame.width, baseFrame.height
-
-        croppedBounds = []
-        croppedImages = []
-
-        croppedActionPts = []
-
-        actionRects = []
-        frameRects = []
-
-        # Use PIL For image operations as it's faster than directly accessing bytes.
-        sheetPilImage = Image.frombytes('RGBA', (self.sheetImage.width, self.sheetImage.height),
-                                        self.sheetImage.get_image_data().get_data('RGBA', self.sheetImage.width * 4))
-
-        actionPilImage = Image.frombytes('RGBA', (self.actionPtImage.width, self.sheetImage.height),
-                                         self.actionPtImage.get_image_data().get_data('RGBA',
-                                                                                      self.sheetImage.width * 4))
-
-        shadowPilImage = Image.frombytes('RGBA', (self.shadowImage.width, self.shadowImage.height),
-                                         self.shadowImage.get_image_data().get_data('RGBA'))
-
-        # FLIP due to data upside down.
-        sheetPilImage = sheetPilImage.transpose(Image.FLIP_TOP_BOTTOM)
-        actionPilImage = actionPilImage.transpose(Image.FLIP_TOP_BOTTOM)
-        shadowPilImage = shadowPilImage.transpose(Image.FLIP_TOP_BOTTOM)
-
-        for i in range(len(self.imageGrid)):
-            startX, startY = i % self.imageGrid.columns, i // self.imageGrid.columns
-            l, t = startX * frameWidth, startY * frameHeight
-            r, b = l + frameWidth, t + frameHeight
-
-            obounds = (l, t, r, b)
-            originalFrame = sheetPilImage.crop(obounds)
-            oActionFrame = actionPilImage.crop(obounds)
-
-            frameBox = originalFrame.getbbox()
-            actionBox = oActionFrame.getbbox()
-
-            # No bounds. Empty frame.
-            if not frameBox:
-                # If no action box, it shouldn't be output?
-                if not actionBox:
-                    continue
-                else:
-                    frameBox = (l, t, l + 1, b + 1)
-
-            bounds = TLRectangle.fromBounds(frameBox)
-            actionBounds = TLRectangle.fromBounds(actionBox)
-
-            croppedBounds.append(bounds)
-
-            frameBound = bounds + (-frameWidth // 2, -frameHeight // 2)
-            # frameBound += actRects[i]
-
-            frameRects.append(frameBound)
-            actionRects.append(actionBounds + (-frameWidth // 2, -frameHeight // 2))
-
-            croppedImages.append(originalFrame.crop(frameBox))
-            croppedActionPts.append(oActionFrame.crop(actionBox))
-
-        groupSizes: dict[str, Tuple[int, int]] = {}
-
-        for groupId, animGroup in enumerate(self.groups):
-            # Skip copies.
-            if self.ui.actionTrim_Copies.isChecked() and self._canTrimCopy(animGroup):
+    def _write_multiple_sheets(self, directory):
+        shadow = Image.frombytes('RGBA', (self.shadow_image.width, self.shadow_image.height),
+                                 self.shadow_image.get_image_data().get_data('RGBA', -self.shadow_image.width * 4))
+        anchor = get_shadow_location_from_pil_image(shadow) or Offset(shadow.width // 2, shadow.height // 2)
+        tiles = {}
+        group_sizes = {}
+        for group in self.groups:
+            if self.ui.actionTrim_Copies.isChecked() and self._copy_target(group, group.copy_name):
                 continue
+            directions = [group.directions[0], *reversed(group.directions[1:])]
+            if self.ui.actionCollapse_Singles.isChecked() and self.is_sequence_collapsable(group):
+                directions = directions[:1]
+            prepared = []
+            half_width = half_height = 1
+            for sequence in directions:
+                row = []
+                for frame in sequence.frames:
+                    if frame.frame_index not in tiles:
+                        region = self.image_grid[frame.frame_index]
+                        tiles[frame.frame_index] = Image.frombytes('RGBA', (region.width, region.height),
+                            region.get_image_data().get_data('RGBA', -region.width * 4))
+                    tile = tiles[frame.frame_index]
+                    image = tile.transpose(Image.Transpose.FLIP_LEFT_RIGHT) if frame.flip else tile
+                    bounds = image.getbbox() or (tile.width // 2, tile.height // 2,
+                                                tile.width // 2 + 1, tile.height // 2 + 1)
+                    sprite = image.crop(bounds)
+                    sx = bounds[0] - tile.width // 2 + frame.sprite_offset.x
+                    sy = bounds[1] - tile.height // 2 + frame.sprite_offset.y
+                    body = self.action_points[frame.frame_index]
+                    pivot = tile.width - 1 - 2 * (tile.width // 2)
+                    points = [((-point.x + pivot if frame.flip else point.x) + frame.sprite_offset.x,
+                               point.y + frame.sprite_offset.y) for point in body.all_pos()]
+                    mx, my = frame.shadow_offset.x - anchor.x, frame.shadow_offset.y - anchor.y
+                    half_width = max(half_width, abs(sx), abs(sx + sprite.width), abs(mx), abs(mx + shadow.width),
+                                     *(max(abs(x), abs(x + 1)) for x, y in points))
+                    half_height = max(half_height, abs(sy), abs(sy + sprite.height), abs(my), abs(my + shadow.height),
+                                      *(max(abs(y), abs(y + 1)) for x, y in points))
+                    row.append((sprite, sx, sy, points, shadow, mx, my))
+                prepared.append(row)
+            width, height = round_up_to_mult(half_width * 2, 8), round_up_to_mult(half_height * 2, 8)
+            group_sizes[group.name] = (width, height)
+            size = (width * len(prepared[0]), height * len(prepared))
+            sprites = Image.new('RGBA', size)
+            offsets = Image.new('RGBA', size)
+            shadows = Image.new('RGBA', size)
+            draw = ImageDraw.Draw(offsets)
+            for row_index, row in enumerate(prepared):
+                for column, (sprite, sx, sy, points, shadow, mx, my) in enumerate(row):
+                    cx, cy = column * width + width // 2, row_index * height + height // 2
+                    sprites.paste(sprite, (cx + sx, cy + sy))
+                    shadows.paste(shadow, (cx + mx, cy + my))
+                    positions = defaultdict(list)
+                    for point, color in zip(points, ((255, 0, 0, 255), (0, 255, 0, 255),
+                                                     (0, 0, 255, 255), (0, 0, 0, 255))):
+                        positions[(cx + point[0], cy + point[1])].append(color)
+                    for position, color in overlap_colors(positions).items():
+                        draw.point(position, color)
+            for suffix, image in (('Anim', sprites), ('Offsets', offsets), ('Shadow', shadows)):
+                image.save(directory / f'{group.name}-{suffix}.png')
+        self._save_export_frame_data(str(directory / 'AnimData.xml'), group_sizes)
 
-            # Max amount of sequences.
-            maxSequence = 0
-
-            # Frames go counter clockwise, but now you want to go clockwise...?
-            directions = [animGroup.directions[0], *reversed(animGroup.directions[1:])]
-
-            maxWidth = maxHeight = 0
-
-            offsetRects = {}
-
-            collapsed = False
-            if self.ui.actionCollapse_Singles.isChecked():
-                collapsed = self.isSequenceCollapsable(animGroup)
-
-            # Search all frames in the animation for the bounds that will fit the separated sheet.
-            for dirIdx, sequence in enumerate(directions):
-                # Determine the maximum bounds for all frames in the sequence.
-                maxSequence = max(maxSequence, len(sequence.frames))
-                for frameIdx, frame in enumerate(sequence.frames):
-                    croppedRect = croppedBounds[frame.frameIndex]
-
-                    # Get the biggest frame size we need. Offsets are expanded by 2x to make it centerable.
-                    adjusted_width = croppedRect.width + abs(frame.spriteOffset.x) * 2
-                    adjusted_height = croppedRect.height + abs(frame.spriteOffset.y) * 2
-
-                    # Offsets and shadows can extend beyond the sprite artwork.
-                    # Keep their whole bounds inside each exported frame too.
-                    actionRect = actionRects[frame.frameIndex]
-                    if frame.flip:
-                        actionRect = actionRect.getFlip()
-                    left = actionRect.x + frame.spriteOffset.x
-                    top = actionRect.y + frame.spriteOffset.y
-                    adjusted_width = max(adjusted_width,
-                                         2 * abs(left), 2 * abs(left + actionRect.width),
-                                         self.shadowImage.width + 2 * abs(frame.shadowOffset.x))
-                    adjusted_height = max(adjusted_height,
-                                          2 * abs(top), 2 * abs(top + actionRect.height),
-                                          self.shadowImage.height + 2 * abs(frame.shadowOffset.y))
-
-                    offsetRects[(dirIdx, frameIdx)] = croppedRect + frame.spriteOffset
-
-                    maxWidth = max(maxWidth, adjusted_width)
-                    maxHeight = max(maxHeight, adjusted_height)
-
-            # Round up the boxes to the nearest eighth.
-            maxWidth = int(roundUpToMult(maxWidth, 8))
-            maxHeight = int(roundUpToMult(maxHeight, 8))
-
-            groupSizes[animGroup.name] = (maxWidth, maxHeight)
-
-            if collapsed:
-                directionCount = 1
-            else:
-                directionCount = 8
-
-            # Now lets output the texture.
-            newAnimImage = Image.new("RGBA", (maxWidth * maxSequence, maxHeight * directionCount), (0, 0, 0, 0))
-            newActionPtImage = Image.new("RGBA", (maxWidth * maxSequence, maxHeight * directionCount), (0, 0, 0, 0))
-            newShadowImage = Image.new("RGBA", (maxWidth * maxSequence, maxHeight * directionCount), (0, 0, 0, 0))
-
-            # Go over all sequences and frames.
-            for dirIdx, sequence in enumerate(directions):
-                startY = dirIdx * maxHeight
-                maxSequence = max(maxSequence, len(sequence.frames))
-
-                for frameIdx, frame in enumerate(sequence.frames):
-                    croppedImg = croppedImages[frame.frameIndex]
-                    croppedOffset = croppedActionPts[frame.frameIndex]
-
-                    frameBounds = croppedBounds[frame.frameIndex]
-                    actionBound = actionRects[frame.frameIndex]
-
-                    if frame.flip:
-                        croppedImg = croppedImg.transpose(Image.FLIP_LEFT_RIGHT)
-                        croppedOffset = croppedOffset.transpose(Image.FLIP_LEFT_RIGHT)
-
-                        frameBounds = Rectangle(-frameBounds.right + frameWidth, frameBounds.y, frameBounds.width,
-                                                frameBounds.height)
-                        actionBound = actionBound.getFlip()
-
-                    translatedRect = centerAndApplyOffset(maxWidth, maxHeight,
-                                                          frameBounds, frame.flip,
-                                                          frame.spriteOffset)
-
-                    startX = (frameIdx * maxWidth)
-
-                    newAnimImage.paste(croppedImg,
-                                       (startX + int(translatedRect[0]), startY + int(translatedRect[1]))
-                                       )
-
-                    actPtX = (maxWidth // 2) + frame.spriteOffset.x + actionBound.x
-                    actPtY = (maxHeight // 2) + frame.spriteOffset.y + actionBound.y
-
-                    newActionPtImage.paste(croppedOffset,
-                                           (startX + actPtX, startY + actPtY))
-
-                    shadowPtX = -(self.shadowImage.width // 2) + (maxWidth // 2) + frame.shadowOffset.x
-                    shadowPtY = -(self.shadowImage.height // 2) + (maxHeight // 2) + frame.shadowOffset.y
-
-                    newShadowImage.paste(shadowPilImage,
-                                         (startX + shadowPtX, startY + shadowPtY))
-
-                if collapsed:
-                    break
-
-            newAnimImage.save(f"{filePath}/{animGroup.name}-Anim.png")
-            newActionPtImage.save(f"{filePath}/{animGroup.name}-Offsets.png")
-            newShadowImage.save(f"{filePath}/{animGroup.name}-Shadow.png")
-
-        self._saveExportFrameData(f"{filePath}/AnimData.xml", groupSizes)
-
-        self.ui.statusBar.showMessage("Multisheet frames were output successfully.", 3000)
-
-    def getAttachmentPointsFromTexture(self, path):
+    def get_attachment_points_from_texture(self, path):
         if os.path.join(path, 'Offsets.png'):
             pass
 
-    def exitApplication(self):
+    def exit_application(self):
         sys.exit(app.exec())
 
 

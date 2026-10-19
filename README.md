@@ -6,7 +6,7 @@ For an easier time, use existing FrameData or AnimData to use and modify. Also m
 ### Controls
 * **O** - Toggle Offset Display (Action Points), if loaded.
 * **S** - Toggle Shadow Display.
-* **Mouse Scroll** - Zoom in and Out of Preview
+* **Mouse Scroll** - Zoom in and Out of Preview. Zooming in follows the sprite's offsets as it animates.
 * **Hold Ctrl + Mouse Scroll** - Adjust opacity of loaded sprite.
 
 ### Save Options

@@ -5,9 +5,7 @@ block_cipher = None
 a = Analysis(['main.py'],
              pathex=[],
              binaries=[],
-             datas=[
-                ('shadow.png', '.')
-             ],
+             datas=[],
              hiddenimports=[],
              hookspath=[],
              hooksconfig={},

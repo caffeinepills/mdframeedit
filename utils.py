@@ -218,11 +218,16 @@ def getActionPointsFromImage(image: pyglet.image.ImageDataRegion) -> Tuple[None 
 
 
 def getShadowLocationFromPILImage(image) -> Offset | None:
-    width, height = image.width, image.height
+    # RGBA getbbox uses alpha, so transparent margins cannot contain markers.
+    bounds = image.getbbox()
+    if bounds is None:
+        return None
+    left, top, right, bottom = bounds
+    pixels = image.load()
 
-    for y in range(height):
-        for x in range(width):
-            pixel = image.getpixel((x, y))
+    for y in range(top, bottom):
+        for x in range(left, right):
+            pixel = pixels[x, y]
 
             if pixel[3] != 0:  # Check if the alpha channel is not transparent
                 if pixel == (255, 255, 255, 255):  # white
@@ -235,16 +240,21 @@ def getShadowLocationFromPILImage(image) -> Offset | None:
 def getActionPointsFromPILImage(image) -> Tuple[None | Offset, None | Offset, None | Offset,
                                                                            None | Offset]:
     """Search an offsets image for the colors specifying attachment points on the animation."""
-    width, height = image.width, image.height
-
     r = None
     g = None
     b = None
     black = None
 
-    for y in range(height):
-        for x in range(width):
-            pixel = image.getpixel((x, y))
+    bounds = image.getbbox()
+    if bounds is None:
+        return r, g, b, black
+    left, top, right, bottom = bounds
+    # Load once instead of asking Pillow to load/validate on every getpixel.
+    pixels = image.load()
+
+    for y in range(top, bottom):
+        for x in range(left, right):
+            pixel = pixels[x, y]
 
             if pixel[3] != 0:  # Check if the alpha channel is not transparent
                 if pixel == (0, 0, 0, 255):  # black

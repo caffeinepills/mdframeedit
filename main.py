@@ -474,7 +474,8 @@ class AnimationEditor:
             app_dir = pathlib.Path(__file__).resolve().parent
 
         shadow_image_path = app_dir / "shadow.png"
-        self.shadowImage = pyglet.image.load(shadow_image_path)
+        with open(shadow_image_path, 'rb') as shadow_file:
+            self.shadowImage = pyglet.image.load(shadow_image_path, file=shadow_file)
         self.shadowImage.anchor_x = self.shadowImage.width // 2
         self.shadowImage.anchor_y = self.shadowImage.height // 2
 
@@ -720,6 +721,14 @@ class AnimationEditor:
 
         return False
 
+    def _canTrimCopy(self, group: AnimGroup, copyName=None):
+        copyName = group.copyName if copyName is None else copyName
+        source = next((candidate for candidate in self.groups if candidate.name == copyName), None)
+        if source is None:
+            return False
+        return (group.rushFrame, group.hitFrame, group.returnFrame, group.directions) == (
+            source.rushFrame, source.hitFrame, source.returnFrame, source.directions)
+
     def createBaseAnimGroupXML(self, animEl: ElementTree.Element, name: str, index: int, group: AnimGroup,
                                trim=False, copyName="", size=None) -> bool:
         ElementTree.SubElement(animEl, "Name").text = name
@@ -728,7 +737,7 @@ class AnimationEditor:
             ElementTree.SubElement(animEl, "Index").text = str(index)
 
         if trim:
-            if copyName:
+            if copyName and self._canTrimCopy(group, copyName):
                 ElementTree.SubElement(animEl, "CopyOf").text = str(copyName)
                 return False
 
@@ -1314,13 +1323,15 @@ class AnimationEditor:
         dirName = os.path.dirname(fileName)
 
         try:
-            sheetImage = pyglet.image.load(f"{dirName}/Anim.png")
+            with open(f"{dirName}/Anim.png", 'rb') as image_file:
+                sheetImage = pyglet.image.load(f"{dirName}/Anim.png", file=image_file)
         except FileNotFoundError:
             self.ui.statusBar.showMessage("Failed to find Anim.png.", 5000)
             return
 
         try:
-            actionPtImage = pyglet.image.load(f"{dirName}/Offsets.png")
+            with open(f"{dirName}/Offsets.png", 'rb') as image_file:
+                actionPtImage = pyglet.image.load(f"{dirName}/Offsets.png", file=image_file)
         except FileNotFoundError:
             actionPtImage = None
             self.ui.statusBar.showMessage("Failed to find Offsets file... skipping.", 5000)
@@ -1952,7 +1963,9 @@ class AnimationEditor:
                         animFrame.shadowOffset.y = -(croppedFrame.y - frameHeight // 2) // 2
 
                     frames.append((frameImg.crop(oFrameBox), actionPoints))
-                    framesToSequence.append((actionIdx, sequenceIdx, frameIdx))
+                    # XML indices are optional and need not uniquely identify a
+                    # group. Keep the actual frame instead of looking it up by ID.
+                    framesToSequence.append(animFrame)
                     group.directions[sequenceIdx].frames.append(animFrame)
 
             if sequenceCount == 1:
@@ -2009,10 +2022,7 @@ class AnimationEditor:
         flippedFrames = set()
         # Now we need to go through and update the data with the correct frame indexes.
         for oldId, oldFrame in enumerate(frames):
-            oldInfo = framesToSequence[oldId]
-            groups = [group for group in self.groups if group.idx == oldInfo[0]]
-            group = groups[0]
-            newFrame = group.directions[oldInfo[1]].frames[oldInfo[2]]
+            newFrame = framesToSequence[oldId]
             changedFrame = oldFrameToNewFrame[oldId]
             newFrame.frameIndex = changedFrame.frameIndex
             newFrame.flip = changedFrame.flip
@@ -2091,7 +2101,7 @@ class AnimationEditor:
 
         root = ElementTree.Element("AnimData")
 
-        ElementTree.SubElement(root, "ShadowSize").text = existingRoot.find("ShadowSize").text
+        ElementTree.SubElement(root, "ShadowSize").text = str(self.shadowSize)
 
         animsEl = ElementTree.SubElement(root, "Anims")
 
@@ -2100,10 +2110,8 @@ class AnimationEditor:
         for groupAnim in self.groups:
             animEl = ElementTree.SubElement(animsEl, "Anim")
             size = frameSizes[groupAnim.name] if groupAnim.name in frameSizes else None
-            self.createBaseAnimGroupXML(animEl, groupAnim.name, groupAnim.idx, groupAnim, trim=trim,
-                                        copyName=groupAnim.copyName, size=size)
-
-            if not groupAnim.copyName:
+            if self.createBaseAnimGroupXML(animEl, groupAnim.name, groupAnim.idx, groupAnim, trim=trim,
+                                           copyName=groupAnim.copyName, size=size):
                 self.createMultiSheetFrameData(animEl, groupAnim)
 
         ElementTree.indent(root)
@@ -2132,10 +2140,12 @@ class AnimationEditor:
     def _exportSingleSheet(self, directory):
         self._saveFrameData(f"{directory}/FrameData.xml")
 
-        self.sheetImage.save(f"{directory}/Anim.png")
+        with open(f"{directory}/Anim.png", 'wb') as image_file:
+            self.sheetImage.save(f"{directory}/Anim.png", file=image_file)
 
         if self.actionPtImage:
-            self.actionPtImage.save(f"{directory}/Offsets.png")
+            with open(f"{directory}/Offsets.png", 'wb') as image_file:
+                self.actionPtImage.save(f"{directory}/Offsets.png", file=image_file)
 
         self.ui.statusBar.showMessage("Single sheet was output successfully.", 3000)
 
@@ -2222,7 +2232,7 @@ class AnimationEditor:
 
         for groupId, animGroup in enumerate(self.groups):
             # Skip copies.
-            if animGroup.copyName != "":
+            if self.ui.actionTrim_Copies.isChecked() and self._canTrimCopy(animGroup):
                 continue
 
             # Max amount of sequences.
@@ -2249,6 +2259,20 @@ class AnimationEditor:
                     # Get the biggest frame size we need. Offsets are expanded by 2x to make it centerable.
                     adjusted_width = croppedRect.width + abs(frame.spriteOffset.x) * 2
                     adjusted_height = croppedRect.height + abs(frame.spriteOffset.y) * 2
+
+                    # Offsets and shadows can extend beyond the sprite artwork.
+                    # Keep their whole bounds inside each exported frame too.
+                    actionRect = actionRects[frame.frameIndex]
+                    if frame.flip:
+                        actionRect = actionRect.getFlip()
+                    left = actionRect.x + frame.spriteOffset.x
+                    top = actionRect.y + frame.spriteOffset.y
+                    adjusted_width = max(adjusted_width,
+                                         2 * abs(left), 2 * abs(left + actionRect.width),
+                                         self.shadowImage.width + 2 * abs(frame.shadowOffset.x))
+                    adjusted_height = max(adjusted_height,
+                                          2 * abs(top), 2 * abs(top + actionRect.height),
+                                          self.shadowImage.height + 2 * abs(frame.shadowOffset.y))
 
                     offsetRects[(dirIdx, frameIdx)] = croppedRect + frame.spriteOffset
 

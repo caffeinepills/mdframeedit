@@ -96,12 +96,14 @@ class Camera:
 def checkDuplicateImages(images: List, bodyCheck=True):
     uniqueImages = []
     uniqueBodyPoints = []
-    cachedRGB = []
+    cachedRGBA = []
     imagesToFrames = {}
     testing = {}
 
     for imgIdx, (image, bodyPoints) in enumerate(images):
-        convert = image.convert('RGB')  # Convert to RGB or comparisons won't work.
+        # Alpha is part of the artwork: RGB-only comparisons merge translucent
+        # frames that render differently. Check all four difference channels.
+        convert = image.convert('RGBA')
         flipped = convert.transpose(Image.FLIP_LEFT_RIGHT)
         oddWidth = image.width % 2 == 1
 
@@ -111,8 +113,8 @@ def checkDuplicateImages(images: List, bodyCheck=True):
             # Quick check for sizes.
 
             if image.width == compareImage.width and image.height == compareImage.height:
-                diff = ImageChops.difference(convert, cachedRGB[compareIdx])
-                if diff.getbbox() is None and (bodyCheck is False or uniqueBodyPoints[compareIdx].equals(bodyPoints, False, oddWidth)):
+                diff = ImageChops.difference(convert, cachedRGBA[compareIdx])
+                if diff.getbbox(alpha_only=False) is None and (bodyCheck is False or uniqueBodyPoints[compareIdx].equals(bodyPoints, False, oddWidth)):
                     # It's a duplicate.
                     #print("duplicate")
                     aniFrame = AnimFrame()
@@ -121,8 +123,8 @@ def checkDuplicateImages(images: List, bodyCheck=True):
                     dupe = True
                     break
 
-                diff = ImageChops.difference(flipped, cachedRGB[compareIdx])
-                if diff.getbbox() is None and (bodyCheck is False or uniqueBodyPoints[compareIdx].equals(bodyPoints, True, oddWidth)):
+                diff = ImageChops.difference(flipped, cachedRGBA[compareIdx])
+                if diff.getbbox(alpha_only=False) is None and (bodyCheck is False or uniqueBodyPoints[compareIdx].equals(bodyPoints, True, oddWidth)):
                     #print("I found a flip!")
                     aniFrame = AnimFrame()
                     aniFrame.frameIndex = compareIdx
@@ -135,7 +137,7 @@ def checkDuplicateImages(images: List, bodyCheck=True):
             aniFrame = AnimFrame()
             aniFrame.frameIndex = len(uniqueImages)
             uniqueImages.append(image)
-            cachedRGB.append(convert)
+            cachedRGBA.append(convert)
             uniqueBodyPoints.append(bodyPoints)
             testing[aniFrame.frameIndex] = imgIdx
             imagesToFrames[imgIdx] = aniFrame
@@ -175,46 +177,11 @@ def centerAndApplyOffset(frame_width, frame_height, rectangle, flipped, offset):
 def getActionPointsFromImage(image: pyglet.image.ImageDataRegion) -> Tuple[None | Offset, None | Offset, None | Offset,
                                                                            None | Offset]:
     """Search an offsets image for the colors specifying attachment points on the animation."""
-    image_data = image.get_image_data()
-
-    if image_data.format == 'BGRA':
-        data = image_data.get_data()
-        ridx = 2
-        gidx = 1
-        bidx = 0
-    else:
-        # Slow if not RGBA.
-        data = image_data.get_data('RGBA')
-        ridx = 0
-        gidx = 1
-        bidx = 2
-
-    width, height = image.width, image.height
-
-    r = None
-    g = None
-    b = None
-    black = None
-
-    for y in range(height):
-        for x in range(width):
-            pixel_start = (y * width + x) * 4  # Each pixel is represented by 4 bytes (RGBA)
-            alpha = data[pixel_start + 3]
-
-            if alpha != 0:  # Check if the alpha channel is not transparent
-                pixel = data[pixel_start:pixel_start+3]
-                if pixel == b'\xff\xff\xff': # skip white.
-                    continue
-                if pixel == b'\x00\x00\x00':  # black
-                    black = Offset(x, height - y)
-                if pixel[ridx] == 255:  # red
-                    r = Offset(x, height - y)
-                if pixel[gidx] == 255:  # green
-                    g = Offset(x, height - y)
-                if pixel[bidx] == 255:  # blue
-                    b = Offset(x, height - y)
-
-    return r, g, b, black
+    # Use the same top-left pixel coordinates and overlapping-color rules as
+    # multi-sheet import. A bottom-up scan used to shift Y by one pixel.
+    data = image.get_image_data().get_data('RGBA', -image.width * 4)
+    pil_image = Image.frombytes('RGBA', (image.width, image.height), data)
+    return getActionPointsFromPILImage(pil_image)
 
 
 def getShadowLocationFromPILImage(image) -> Offset | None:

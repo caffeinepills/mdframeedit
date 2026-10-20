@@ -759,6 +759,26 @@ class AnimationEditor(AnimationSerialization):
         self.animationSettingsClipboard: AnimGroup | None = None
         self.editMenu.aboutToShow.connect(self.updateAnimationSettingsActions)
         self.editMenu.addSeparator()
+        self.actionPointsClipboard: ActionPoints | None = None
+        self.copyActionPointsAction = self.editMenu.addAction(
+            "Copy Action Points", self.copyActionPoints
+        )
+        self.pasteActionPointsAction = self.editMenu.addAction(
+            "Paste Action Points", self.pasteActionPoints
+        )
+        for action, shortcut in (
+            (self.copyActionPointsAction, QtGui.QKeySequence.StandardKey.Copy),
+            (self.pasteActionPointsAction, QtGui.QKeySequence.StandardKey.Paste),
+        ):
+            action.setEnabled(False)
+            action.setShortcuts(shortcut)
+            action.setShortcutContext(QtCore.Qt.ShortcutContext.WidgetShortcut)
+            ui.loadedSheetFrameList.addAction(action)
+        ui.loadedSheetFrameList.setContextMenuPolicy(
+            QtCore.Qt.ContextMenuPolicy.ActionsContextMenu
+        )
+        self.editMenu.aboutToShow.connect(self.updateActionPointActions)
+        self.editMenu.addSeparator()
         self.resizeFramesAction = self.editMenu.addAction(
             "Resize Frame Cells...", self.openResizeFrames
         )
@@ -1208,6 +1228,8 @@ class AnimationEditor(AnimationSerialization):
                     spinBox.setEnabled(index is not None)
         self.refreshSheetFramePreview()
 
+        self.updateActionPointActions()
+
     def refreshSheetFramePreview(self) -> None:
         index = self.selected_sheet_frame
         if index is None or self.image_grid is None:
@@ -1345,6 +1367,53 @@ class AnimationEditor(AnimationSerialization):
         if getattr(body, fieldName) == offset:
             return
         setattr(body, fieldName, offset)
+        self.refreshActionPointEdits(index)
+
+    def updateActionPointActions(self) -> None:
+        owner = self.document_host or self
+        index = self.selected_sheet_frame
+        selected = (
+            index is not None and self.image_grid is not None
+            and 0 <= index < len(self.image_grid)
+        )
+        self.copyActionPointsAction.setEnabled(selected and index in self.action_points)
+        self.pasteActionPointsAction.setEnabled(
+            selected and owner.actionPointsClipboard is not None
+        )
+
+    def copyActionPoints(self) -> None:
+        body = self.action_points.get(self.selected_sheet_frame)
+        if body is None:
+            return
+        owner = self.document_host or self
+        owner.actionPointsClipboard = copy.deepcopy(body)
+        editors = self.document_host._editors.values() if self.document_host else (self,)
+        for editor in editors:
+            editor.updateActionPointActions()
+        self.ui.statusBar.showMessage(
+            f"Copied action points from sheet frame {self.selected_sheet_frame}.", 4000
+        )
+
+    @undoable("Paste Action Points")
+    def pasteActionPoints(self) -> bool:
+        source = (self.document_host or self).actionPointsClipboard
+        index = self.selected_sheet_frame
+        if (
+            source is None or index is None or self.image_grid is None
+            or not 0 <= index < len(self.image_grid)
+        ):
+            return False
+        body = copy.deepcopy(self.action_points.get(index, ActionPoints()))
+        for name in ("left_hand", "right_hand", "head", "center"):
+            setattr(body, name, copy.deepcopy(getattr(source, name)))
+        if body == self.action_points.get(index):
+            return False
+        self.action_points[index] = body
+        self.selectSheetFrame(index)
+        self.refreshActionPointEdits(index)
+        return True
+
+    def refreshActionPointEdits(self, index: int) -> None:
         for groupItem in self._get_action_list_items():
             if any(
                 other.frame_index == index
@@ -1355,9 +1424,14 @@ class AnimationEditor(AnimationSerialization):
                 groupItem.update_text()
         if not self.animating:
             self.set_animation()
+        elif self.sprite is not None:
+            self.openGLWidget.makeCurrent()
+            self.updateActionPointPreview(self.displayed_anim_frame or self.current_anim_frame)
+            self.openGLWidget.update()
+        self.updateActionPointActions()
         self.refreshSheetFramePreview()
         self.ui.statusBar.showMessage(
-            "Action point updated for all frames using this sheet image.", 4000
+            "Action points updated for all frames using this sheet image.", 4000
         )
 
     def setActionPointsVisible(self, visible: bool) -> None:
@@ -2896,6 +2970,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         self._saved_states: dict[QtWidgets.QWidget, tuple[object, ...]] = {}
         self._active_editor: AnimationEditor | None = None
         self.animationSettingsClipboard: AnimGroup | None = None
+        self.actionPointsClipboard: ActionPoints | None = None
         self.batchEditDialog: BatchEditDialog | None = None
         self.documentTabs = QtWidgets.QTabWidget(self)
         self.documentTabs.setObjectName("documentTabs")

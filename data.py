@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 from dataclasses import field, dataclass
 from enum import Enum
-from typing import List
 
 VERSION = "2.0"
 
@@ -32,7 +33,7 @@ class SheetFormat(Enum):
     MULTI = "AnimData.xml"
 
 
-@dataclass
+@dataclass(slots=True)
 class Offset:
     x: int = 0  # XOffset
     y: int = 0  # YOffset
@@ -79,7 +80,7 @@ class Offset:
         return self.x, self.y
 
 
-@dataclass
+@dataclass(slots=True)
 class AnimFrame:
     idx: int = 0  # (Not used in frame, used for indexing slider points)
     frame_index: int = 0  # MetaFrameGroupIndex (actual frame in sheet.)
@@ -88,6 +89,9 @@ class AnimFrame:
     shadow_offset: Offset = field(default_factory=Offset)  # Shadow
     sprite_offset: Offset = field(default_factory=Offset)  # Sprite
     is_default_copy: bool = field(compare=False, default=False)
+    default_copy: AnimFrame | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self):
         if not self.is_default_copy:
@@ -101,22 +105,22 @@ class AnimFrame:
 
     @property
     def changed(self):
-        return self != self.default_copy
+        return self.default_copy is not None and self != self.default_copy
 
 
-@dataclass
+@dataclass(slots=True)
 class AnimationSequence:
-    frames: List[AnimFrame] = field(default_factory=list)
+    frames: list[AnimFrame] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class AnimGroup:
     idx: int
     name: str
     rush_frame: int = -1
     hit_frame: int = -1
     return_frame: int = -1
-    directions: List[AnimationSequence] = field(default_factory=lambda: [AnimationSequence() for _ in range(8)])  # 8 directions.
+    directions: list[AnimationSequence] = field(default_factory=lambda: [AnimationSequence() for _ in range(8)])  # 8 directions.
     copy_name: str = field(compare=False, default='')  # If it is a copy of another group.
     modified: bool = field(compare=False, default=False)  # If it has been modified since loading.
 
@@ -149,7 +153,7 @@ class AnimGroup:
         return rush, hit, returned
 
 
-@dataclass
+@dataclass(slots=True)
 class Rectangle:
     x: int
     y: int
@@ -185,7 +189,7 @@ class Rectangle:
         return f"Rectangle(x={self.x}, y={self.y}, width={self.width}, height={self.height}, ltrb={(self.left, self.top, self.right, self.bottom)})"
 
 
-@dataclass
+@dataclass(slots=True)
 class TLRectangle:
     x: int
     y: int
@@ -242,7 +246,7 @@ def center_bounds(rect: Rectangle):
     max_y = max(-rect.y, rect.top)
     return Rectangle(min_x, min_y, max_x - min_x, max_y - min_y)
 
-@dataclass
+@dataclass(slots=True)
 class ActionPoints:
     left_hand: Offset = field(default_factory=Offset) # red[1]
     center: Offset = field(default_factory=Offset)  # green[2]
@@ -343,3 +347,17 @@ class ActionPoints:
         bottom = max(max(self.center.y, self.head.y), max(self.left_hand.y, self.right_hand.y)) + 1
 
         return Rectangle(left, bottom, right-left, top-bottom)
+
+
+@dataclass(slots=True)
+class EditState:
+    """Data holder for edit state."""
+    groups: list[AnimGroup]
+    action_points: dict[int, ActionPoints]
+    shadow_size: int
+    shadow_size_present: bool
+    action_row: int
+    frame_row: int
+    direction: int
+    sheet_frame: int | None
+    signature: tuple[object, ...]

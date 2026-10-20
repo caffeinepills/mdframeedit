@@ -12,7 +12,7 @@ import os
 import pathlib
 import traceback
 import xml.etree.ElementTree as ElementTree
-from functools import partial
+from functools import partial, wraps
 from hashlib import sha256
 from typing import TYPE_CHECKING
 
@@ -47,7 +47,7 @@ from data import (
     AnimFrame,
     AnimGroup,
     Offset,
-    SheetFormat,
+    SheetFormat, EditState,
 )
 from formats import detect_format, validate_export
 from gui.batchadd import Ui_BatchCreateAction
@@ -63,7 +63,7 @@ from utils import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
     from os import PathLike
     from types import TracebackType
 
@@ -71,6 +71,47 @@ if TYPE_CHECKING:
 
 pyglet.image.Texture.default_min_filter = GL_NEAREST
 pyglet.image.Texture.default_mag_filter = GL_NEAREST
+
+
+class SpriteEditCommand(QtGui.QUndoCommand):
+    def __init__(
+        self, editor: AnimationEditor, text: str, before: EditState, after: EditState
+    ) -> None:
+        super().__init__(text)
+        self.editor = editor
+        self.before = before
+        self.after = after
+        self.firstRedo = True
+
+    def undo(self) -> None:
+        self.editor.restoreEditState(self.before)
+
+    def redo(self) -> None:
+        if self.firstRedo:
+            self.firstRedo = False
+        else:
+            self.editor.restoreEditState(self.after)
+
+
+def undoable(text: str) -> Callable[[Callable[..., None]], Callable[..., None]]:
+    """Record one complete editor operation, including nested edit handlers."""
+    def decorate(method: Callable[..., None]) -> Callable[..., None]:
+        @wraps(method)
+        def record(editor: AnimationEditor, *args: object, **kwargs: object) -> None:
+            if editor.loaded_tree is None or editor.editDepth or editor.restoringEdit:
+                method(editor, *args, **kwargs)
+                return
+            before = editor.captureEditState()
+            editor.editDepth += 1
+            try:
+                method(editor, *args, **kwargs)
+            finally:
+                editor.editDepth -= 1
+            after = editor.captureEditState()
+            if before.signature != after.signature:
+                editor.undoStack.push(SpriteEditCommand(editor, text, before, after))
+        return record
+    return decorate
 
 
 class LoadedSheetFrame(QListWidgetItem):
@@ -786,6 +827,19 @@ class AnimationEditor(AnimationSerialization):
         self.loaded_shadow_size = 0
         self.loaded_tree: ElementTree.ElementTree | None = None
         self.batch_add_implem: BatchAddImplementation | None = None
+        self.undoStack = QtGui.QUndoStack(window)
+        self.undoStack.setUndoLimit(100)
+        self.editDepth = 0
+        self.restoringEdit = False
+        self.savedEditSignature: tuple[object, ...] | None = None
+        self.editMenu = QtWidgets.QMenu("Edit", window)
+        self.undoAction = self.undoStack.createUndoAction(window, "Undo")
+        self.redoAction = self.undoStack.createRedoAction(window, "Redo")
+        self.editMenu.addActions([self.undoAction, self.redoAction])
+        if document_host is None:
+            self.undoAction.setShortcuts(QtGui.QKeySequence.StandardKey.Undo)
+            self.redoAction.setShortcuts(QtGui.QKeySequence.StandardKey.Redo)
+            window.menuBar().insertMenu(ui.menuBatch.menuAction(), self.editMenu)
 
         self.settings = QSettings("MDFrameEditor", "Frame Editor")
         self.recent_files: list[str] = self.settings.value("recent", [], list)
@@ -1007,6 +1061,100 @@ class AnimationEditor(AnimationSerialization):
                     partial(self.actionPointChanged, pointName)
                 )
 
+    def captureEditState(self) -> EditState:
+        """Snapshot editable metadata without copying artwork or GL resources."""
+        groups, points = copy.deepcopy((self.groups, self.action_points))
+        return EditState(
+            groups, points, self.shadow_size, self.shadow_size_present,
+            self.ui.actionListWidget.currentRow(),
+            self.ui.animationFrameList.currentRow(), self.current_direction,
+            self.selected_sheet_frame, SpriteEditorWindow._document_state(self),
+        )
+
+    def restoreEditState(self, state: EditState) -> None:
+        """Restore metadata and selection while retaining preview preferences."""
+        self.restoringEdit = True
+        playing = self.animating
+        spriteVisible = self.sprite.visible if self.sprite is not None else True
+        shadowVisible = self.shadow.visible if self.shadow is not None else True
+        pyglet.clock.unschedule(self._playing_animation)
+        self.animating = False
+        try:
+            if self.sprite is not None:
+                self.openGLWidget.makeCurrent()
+                self.sprite.delete()
+                self.shadow.delete()
+                self.sprite = self.shadow = None
+            for marker in self.ap_sprites:
+                marker.delete()
+            self.ap_sprites.clear()
+            self.left_hand = self.center = self.right_hand = self.head = (
+                self.shadow_point
+            ) = None
+            self.displayed_anim_frame = None
+            self.current_anim_group = self.current_sequence = None
+            self.clear_anim_frame()
+            self.groups, self.action_points = copy.deepcopy(
+                (state.groups, state.action_points)
+            )
+            self.shadow_size_present = state.shadow_size_present
+            self.shadow_size = state.shadow_size
+            if self.savedEditSignature is not None:
+                current = SpriteEditorWindow._document_state(self)
+                savedGroups = {group[:2]: group for group in self.savedEditSignature[2]}
+                savedPoints = dict(self.savedEditSignature[3])
+                changedPoints = {
+                    index for index, points in current[3]
+                    if points != savedPoints.get(index)
+                } | (savedPoints.keys() - self.action_points.keys())
+                for group, signature in zip(self.groups, current[2]):
+                    group.modified = (
+                        current[:2] != self.savedEditSignature[:2]
+                        or signature != savedGroups.get(signature[:2])
+                        or any(
+                            frame.frame_index in changedPoints
+                            for sequence in group.directions for frame in sequence.frames
+                        )
+                    )
+            self.current_direction = state.direction
+            for index, button in enumerate(self.directionButtons):
+                button.setChecked(index == state.direction)
+            with (
+                QtCore.QSignalBlocker(self.ui.actionListWidget),
+                QtCore.QSignalBlocker(self.ui.animationFrameList),
+                QtCore.QSignalBlocker(self.ui.frameSlider),
+            ):
+                self.ui.actionListWidget.clear()
+                self.ui.animationFrameList.clear()
+                for group in self.groups:
+                    self.ui.actionListWidget.addItem(AnimGroupItem(group, self))
+                self.ui.actionListWidget.setCurrentRow(state.action_row)
+                if 0 <= state.action_row < len(self.groups):
+                    self.current_anim_group = self.groups[state.action_row]
+                    self.current_sequence = self.current_anim_group.directions[state.direction]
+                    frames = self.current_sequence.frames
+                    row = min(max(state.frame_row, 0), len(frames) - 1)
+                    if frames:
+                        self.current_anim_frame = frames[row]
+                    self.set_sequence_list()
+                    self.ui.animationFrameList.setCurrentRow(row)
+                    self.ui.frameSlider.setValue(max(row, 0))
+                    if frames:
+                        self.set_anim_frame_values(frames[row])
+            self.selectSheetFrame(state.sheet_frame)
+            if self.sprite is not None:
+                self.sprite.visible = spriteVisible
+                self.shadow.visible = shadowVisible
+            if playing and self.current_anim_frame is not None:
+                self.animating = True
+                if self.document_host is None or self.document_host.current_editor is self:
+                    pyglet.clock.schedule_once(
+                        self._playing_animation, self.anim_speed * self.current_anim_frame.duration
+                    )
+            self.openGLWidget.update()
+        finally:
+            self.restoringEdit = False
+
     def setPreviewOpacity(self, target: str, opacity: int) -> None:
         getattr(self.ui, target + "OpacityLabel").setText(
             f"{round(opacity * 100 / 255)}%"
@@ -1185,6 +1333,7 @@ class AnimationEditor(AnimationSerialization):
         self.openGLWidget.update()
         self.ui.statusBar.showMessage("Artwork reloaded.", 3000)
 
+    @undoable("Change Action Point")
     def actionPointChanged(self, pointName: str, value: int) -> None:
         index = self.selected_sheet_frame
         if index is None:
@@ -1261,6 +1410,7 @@ class AnimationEditor(AnimationSerialization):
             self.shadow.image = self._display_shadow_image()
             self.openGLWidget.update()
 
+    @undoable("Change Shadow Size")
     def apply_shadow_size(self, size: int) -> None:
         if not self.loaded_tree:
             return
@@ -1280,6 +1430,7 @@ class AnimationEditor(AnimationSerialization):
         fmt.setVersion(3, 3)
         QSurfaceFormat.setDefaultFormat(fmt)
 
+    @undoable("Set Return Frame")
     def set_return_point(self) -> None:
         item: AnimFrameItem = self.ui.animationFrameList.currentItem()
         if item and self.current_anim_group:
@@ -1292,6 +1443,7 @@ class AnimationEditor(AnimationSerialization):
             for frame_item in self._get_frame_list_items():
                 frame_item.update_text()
 
+    @undoable("Set Hit Frame")
     def set_hit_point(self) -> None:
         item: AnimFrameItem = self.ui.animationFrameList.currentItem()
         if item and self.current_anim_group:
@@ -1304,6 +1456,7 @@ class AnimationEditor(AnimationSerialization):
             for frame_item in self._get_frame_list_items():
                 frame_item.update_text()
 
+    @undoable("Set Rush Frame")
     def set_rush_point(self) -> None:
         item: AnimFrameItem = self.ui.animationFrameList.currentItem()
         if item and self.current_anim_group:
@@ -1331,6 +1484,7 @@ class AnimationEditor(AnimationSerialization):
     def save_collapse(self) -> None:
         self.settings.setValue("collapse", self.ui.actionCollapse_Singles.isChecked())
 
+    @undoable("Reset Frame")
     def default_frame_click(self) -> None:
         if self.current_sequence:
             item: AnimFrameItem = self.ui.animationFrameList.currentItem()
@@ -1401,6 +1555,8 @@ class AnimationEditor(AnimationSerialization):
                 for frame in sequence.frames:
                     frame.reset()
         self.add_recent_list(self.file_name)
+        self.savedEditSignature = SpriteEditorWindow._document_state(self)
+        self.undoStack.setClean()
         if self.document_host:
             self.document_host.document_saved(self)
         return True
@@ -1418,6 +1574,7 @@ class AnimationEditor(AnimationSerialization):
             self.window, "Error", text, QtWidgets.QMessageBox.StandardButton.Ok
         )
 
+    @undoable("Change Sheet Frame")
     def frame_index_changed(self) -> None:
         item: AnimFrameItem = self.ui.animationFrameList.currentItem()
         if item:
@@ -1437,6 +1594,7 @@ class AnimationEditor(AnimationSerialization):
 
                     self._set_anim_frame_display(item.anim_frame)
 
+    @undoable("Move Frame")
     def _move_frame(self, row_dir: int) -> None:
         current_pos = self.ui.animationFrameList.currentRow()
         if row_dir < 0 and current_pos == 0:
@@ -1478,6 +1636,7 @@ class AnimationEditor(AnimationSerialization):
         if self.current_sequence:
             self.copied_sequence = copy.deepcopy(self.current_sequence)
 
+    @undoable("Paste Sequence")
     def paste_sequence(self) -> None:
         if self.current_sequence:
             if self.copied_sequence:
@@ -1536,6 +1695,7 @@ class AnimationEditor(AnimationSerialization):
         for m in range(recent_count, self.MAX_RECENT):
             self.recentFileActions[m].setVisible(False)
 
+    @undoable("Delete Action")
     def delete_action(self) -> None:
         current: AnimGroupItem = self.ui.actionListWidget.currentItem()
 
@@ -1549,6 +1709,7 @@ class AnimationEditor(AnimationSerialization):
             )
             if ret == QtWidgets.QMessageBox.StandardButton.Yes:
                 row = self.ui.actionListWidget.row(current)
+                self.groups = [group for group in self.groups if group is not current.anim_group]
                 taken = self.ui.actionListWidget.takeItem(row)
                 del taken
 
@@ -1568,6 +1729,7 @@ class AnimationEditor(AnimationSerialization):
 
                 self.ui.animationFrameList.clear()
 
+    @undoable("Duplicate Action")
     def duplicate_action(self) -> None:
         current: AnimGroupItem = self.ui.actionListWidget.currentItem()
 
@@ -1638,6 +1800,7 @@ class AnimationEditor(AnimationSerialization):
 
                 self.ui.statusBar.showMessage(f"Action: {name} created.", 5000)
 
+    @undoable("Add Action")
     def open_add_action(self) -> None:
         name, ok = QInputDialog.getText(
             self.window, "Create New Action", "Enter an action name."
@@ -1703,6 +1866,7 @@ class AnimationEditor(AnimationSerialization):
 
         self.ui.animationSpeedLabel.setText(f"{new_speed}x")
 
+    @undoable("Change Frame Duration")
     def duration_changed(self) -> None:
         if self.current_sequence:
             item: AnimFrameItem = self.ui.animationFrameList.currentItem()
@@ -1715,6 +1879,7 @@ class AnimationEditor(AnimationSerialization):
 
                 self._notify_changes()
 
+    @undoable("Mirror Frame")
     def flip_changed(self) -> None:
         if self.current_sequence:
             item: AnimFrameItem = self.ui.animationFrameList.currentItem()
@@ -1732,6 +1897,7 @@ class AnimationEditor(AnimationSerialization):
 
                     self._notify_changes()
 
+    @undoable("Change Sprite Offset")
     def sprite_offset_changed(self) -> None:
         if self.current_sequence:
             item: AnimFrameItem = self.ui.animationFrameList.currentItem()
@@ -1752,6 +1918,7 @@ class AnimationEditor(AnimationSerialization):
 
                     self._notify_changes()
 
+    @undoable("Change Shadow Offset")
     def shadow_offset_changed(self) -> None:
         if self.current_sequence:
             item: AnimFrameItem = self.ui.animationFrameList.currentItem()
@@ -1772,6 +1939,7 @@ class AnimationEditor(AnimationSerialization):
 
                     self._notify_changes()
 
+    @undoable("Duplicate Frame")
     def duplicate_frame(self) -> None:
         """Duplicate the selected frame in the Animation Sequence List"""
         if self.current_sequence:
@@ -1800,6 +1968,7 @@ class AnimationEditor(AnimationSerialization):
 
                 self._add_anim_frame(anim_frame)
 
+    @undoable("Delete Frame")
     def delete_selected_frames(self) -> None:
         """Delete the selected frame in the Animation Sequence List"""
         if self.current_sequence:
@@ -2050,11 +2219,13 @@ class AnimationEditor(AnimationSerialization):
         self.trackArtwork()
         if expected == SheetFormat.SINGLE and self.batch_add_implem:
             self.batch_add_implem.loaded_frame_data()
+        self.savedEditSignature = SpriteEditorWindow._document_state(self)
         self.ui.statusBar.showMessage(
             "Frame data and images loaded successfully.", 3000
         )
         return True
 
+    @undoable("Add Frame")
     def add_new_animation_frame(self, frame_idx: int) -> None:
         """Create new animation frame in the sequence. Adds to the end."""
         if self.current_sequence:
@@ -2093,9 +2264,8 @@ class AnimationEditor(AnimationSerialization):
             image: pyglet.image.ImageDataRegion
             image.anchor_x = image.width // 2
             image.anchor_y = image.height // 2
-            if self.action_points:
-                if idx not in self.action_points:
-                    continue
+            if self.action_points and idx not in self.action_points:
+                continue
             item = LoadedSheetFrame(
                 f"Frame {idx}", idx, image, self.ui.sheetFramePicture, self
             )
@@ -2115,6 +2285,8 @@ class AnimationEditor(AnimationSerialization):
 
     def clear(self) -> None:
         """Clear everything so we can load a new sprite."""
+        self.undoStack.clear()
+        self.savedEditSignature = None
         self.ui.groupBox_5.setTitle("Sprite Sheet")
         self.artworkReloadTimer.stop()
         self.artworkPath = None
@@ -2484,7 +2656,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
             ("cameraLocked", "Lock Camera", True, self.settingsMenu),
             (
                 "autoReloadArtwork",
-                "Auto Reload Artwork (Single Sheet)",
+                "Auto Reload Artwork",
                 False,
                 self.settingsMenu,
             ),
@@ -2569,6 +2741,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
                 group.idx,
                 group.name,
                 group.copy_name,
+                group.is_single_direction,
                 group.rush_frame,
                 group.hit_frame,
                 group.return_frame,
@@ -2710,6 +2883,8 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
     def _activate_document(self, index: int) -> None:
         self.updateArtworkReloadAction()
         if self._active_editor is not None:
+            self._active_editor.undoAction.setShortcuts([])
+            self._active_editor.redoAction.setShortcuts([])
             self._capturePanelLayout(self._active_editor)
             self._active_editor.openGLWidget.timer.stop()
             pyglet.clock.unschedule(self._active_editor._playing_animation)
@@ -2717,8 +2892,10 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         editor = self.current_editor
         self._active_editor = editor
         if editor is not None:
+            editor.undoAction.setShortcuts(QtGui.QKeySequence.StandardKey.Undo)
+            editor.redoAction.setShortcuts(QtGui.QKeySequence.StandardKey.Redo)
             self._restorePanelLayout(editor)
-            for menu in (editor.ui.menuFile, editor.ui.menuBatch):
+            for menu in (editor.ui.menuFile, editor.editMenu, editor.ui.menuBatch):
                 self.menuBar().addAction(menu.menuAction())
             self.menuBar().addMenu(self.viewMenu)
             self.menuBar().addMenu(self.settingsMenu)
@@ -2794,6 +2971,11 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
 
     def _dispose_document(self, page: QtWidgets.QWidget) -> None:
         editor = self._editors.pop(page)
+        editor.undoStack.clear()
+        editor.undoStack.deleteLater()
+        editor.editMenu.deleteLater()
+        editor.undoAction.deleteLater()
+        editor.redoAction.deleteLater()
         editor.setArtworkReloadEnabled(False)
         editor.artworkWatcher.deleteLater()
         editor.artworkReloadTimer.deleteLater()

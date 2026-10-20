@@ -1,5 +1,7 @@
 """Sprite conversion using the standalone Pillow/XML backend."""
 
+from __future__ import annotations
+
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -47,7 +49,8 @@ def positive_integer(value):
 
 def create_parser():
     parser = argparse.ArgumentParser(
-        description="Convert single-sheet and multi-sheet sprite bundles without opening the editor."
+        description="Convert single-sheet and multi-sheet sprite bundles without opening the editor.",
+        epilog="To inspect artwork instead, use: palette INPUT (XML file, sprite folder, or PNG sheet).",
     )
     parser.add_argument("input", type=Path, help="source XML file or sprite folder")
     parser.add_argument(
@@ -209,9 +212,62 @@ def run_conversions(jobs, workers, executor="process"):
             raise
 
 
+def palette_main(argv: list[str]) -> int:
+    """Print artwork statistics without starting the editor or writing files."""
+    from PIL import Image
+
+    from conversion import SpriteDocument
+    from utils import FormatError, analyze_artwork
+
+    parser = argparse.ArgumentParser(
+        prog=f"{Path(sys.argv[0]).name} palette",
+        description="Report artwork palette values and translucent pixels without opening the editor.",
+    )
+    parser.add_argument("input", type=Path, help="sprite XML file, sprite folder, or PNG sheet")
+    args = parser.parse_args(argv)
+    source = args.input.resolve()
+    try:
+        if source.is_dir():
+            candidates = [
+                path for path in source.iterdir()
+                if path.is_file() and path.name.casefold() in {"framedata.xml", "animdata.xml"}
+            ]
+            if len(candidates) != 1:
+                msg = "Choose a sprite XML file directly. The folder must contain exactly one FrameData.xml or AnimData.xml."
+                raise ConversionError(msg)
+            source = candidates[0]
+        if source.suffix.lower() == ".png":
+            with Image.open(source) as image:
+                info = analyze_artwork(image)
+        elif source.suffix.lower() == ".xml":
+            document = SpriteDocument.load(source)
+            info = analyze_artwork(document.sheet_image)
+        else:
+            msg = "Input must be a sprite XML file, sprite folder, or PNG sheet."
+            raise ConversionError(msg)
+    except (ConversionError, FormatError, OSError, ET.ParseError) as error:
+        print(f"Could not read palette: {error}", file=sys.stderr)
+        return 1
+
+    translucent = sum(color.pixels for color in info.palette if 0 < color.rgba[3] < 255)
+    print(f"Source: {source}")
+    print(f"Sheet size: {info.width} x {info.height}")
+    print(f"Palette count (unique RGBA values, including transparent): {len(info.palette)}")
+    print(f"Has translucent pixels: {'yes' if translucent else 'no'}")
+    print(f"Translucent pixels (alpha 1-254): {translucent}")
+    print("RGB hex   RGBA                  Pixels")
+    for color in info.palette:
+        rgb = "#" + "".join(f"{channel:02X}" for channel in color.rgba[:3])
+        rgba = ", ".join(map(str, color.rgba))
+        print(f"{rgb}   {rgba:<21} {color.pixels}")
+    return 0
+
+
 def main(argv=None):
     multiprocessing.freeze_support()
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "palette":
+        return palette_main(arguments[1:])
     if arguments and arguments[0] == "convert":
         arguments.pop(0)
     parser = create_parser()

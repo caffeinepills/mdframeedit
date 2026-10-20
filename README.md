@@ -238,6 +238,20 @@ If you don't trust the release versions, you can download the source and package
 
 # Command-line conversion
 
+To check a sheet's palette without opening the editor:
+
+```shell
+python main.py palette sprites/FrameData.xml
+python main.py palette sprites/AnimData.xml
+python main.py palette sprites/Anim.png
+```
+
+This lists RGB hex values, RGBA values and pixel counts, plus the total palette
+count. XML inputs use the same working sheet as the editor's Info window. For multi sheets, that means the
+imported sheet with duplicate frames combined. PNG inputs count the image as-is.
+You can also pass a sprite folder containing one of the XML files.
+To save the report, add `> palette.txt` to the command.
+
 You can convert between single and multi sheets without opening the editor:
 
 ```shell

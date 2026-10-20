@@ -580,7 +580,7 @@ class Ui_MainWindow(object):
                 groupLayout.addLayout(self.shadowPreviewOptionsLayout)
             elif name == 'actionPoints':
                 self.showActionPointsCheckBox = QtWidgets.QCheckBox(group)
-                self.showActionPointsCheckBox.setChecked(True)
+                self.showActionPointsCheckBox.setChecked(False)
                 self.showActionPointsCheckBox.setAccessibleName('Show action points')
                 groupLayout.addWidget(self.showActionPointsCheckBox)
             groupLayout.addStretch(1)

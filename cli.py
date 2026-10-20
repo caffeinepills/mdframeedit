@@ -221,6 +221,8 @@ def main(argv=None):
     launcher = getattr(sys.modules["__main__"], "__file__", "")
     if (
         args.executor == "process"
+        and not getattr(sys, "frozen", False)
+        and "__compiled__" not in globals()
         and launcher
         and Path(launcher).resolve() == Path(__file__).with_name("main.py").resolve()
     ):

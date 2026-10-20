@@ -2320,6 +2320,9 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
     def __init__(self, app: QtWidgets.QApplication) -> None:
         super().__init__()
         self.app = app
+        self.app.setWindowIcon(
+            QtGui.QIcon(str(pathlib.Path(__file__).with_name("icon.ico")))
+        )
         self.settings = QSettings("MDFrameEditor", "Frame Editor")
         self.panelStates: dict[str, QtCore.QByteArray] = {}
         for name in ("mainSplitter", "previewSplitter"):

@@ -28,6 +28,7 @@ mdframeedit-convert = "cli:main"
 [tool.ruff.lint]
 select = ["ALL"]
 future-annotations = true
+extend-safe-fixes = ["EM101", "EM102"]
 
 [tool.ruff.lint.isort]
 required-imports = ["from __future__ import annotations"]

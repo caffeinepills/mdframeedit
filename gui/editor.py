@@ -77,7 +77,7 @@ class IconButton(EditorButton):
             path.lineTo(6, -2)
             path.moveTo(0, -8)
             path.lineTo(0, 8)
-        elif self.symbol == "restore":
+        elif self.symbol in ("restore", "rotate_left", "rotate_right"):
             path.moveTo(-8, -4)
             path.cubicTo(-1, -11, 10, -6, 8, 3)
             path.cubicTo(7, 9, -2, 12, -7, 6)
@@ -123,6 +123,8 @@ class IconButton(EditorButton):
         painter.scale(scale, scale)
         if self.symbol == "down":
             painter.rotate(180)
+        elif self.symbol == "rotate_right":
+            painter.scale(-1, 1)
         painter.setPen(QtGui.QPen(option.palette.buttonText().color(), 1.8,
                                  Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.drawPath(self._iconPath())
@@ -609,6 +611,20 @@ class Ui_MainWindow:
             button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum, QtWidgets.QSizePolicy.Policy.Maximum)
             setattr(self, name, button)
             self.gridLayout_2.addWidget(button, row, column)
+        self.directionRotationLayout = makeLayout(QtWidgets.QHBoxLayout)
+        self.directionRotationLayout.addStretch(1)
+        for name, symbol, description in (
+                ("rotateLeftButton", "rotate_left", "Rotate left (counterclockwise)"),
+                ("rotateRightButton", "rotate_right", "Rotate right (clockwise)")):
+            button = IconButton(symbol, self.directionGroupBox)
+            button.setObjectName(name)
+            button.setToolTip(description)
+            button.setAccessibleName(description)
+            button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum, QtWidgets.QSizePolicy.Policy.Maximum)
+            setattr(self, name, button)
+            self.directionRotationLayout.addWidget(button)
+        self.directionRotationLayout.addStretch(1)
+        self.gridLayout_2.addLayout(self.directionRotationLayout, 3, 0, 1, 3)
         self.shadowOffsetScopeLabel = QtWidgets.QLabel(self.inspectorPanel)
         self.frameHeaderLayout = makeLayout(QtWidgets.QHBoxLayout)
         self.frameHeaderLayout.addStretch(1)

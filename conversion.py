@@ -245,6 +245,119 @@ class SpriteDocument(AnimationSerialization):
             self.sheet_image, self.frame_width, self.frame_height
         )
 
+    def trimmed_frame_size(self) -> tuple[int, int]:
+        """Find shared dimensions around the existing frame origin."""
+        half_width = half_height = 0
+
+        def include(bounds: tuple[int, int, int, int] | None) -> None:
+            nonlocal half_width, half_height
+            if bounds is not None:
+                half_width = max(
+                    half_width, self.frame_width // 2 - bounds[0],
+                    bounds[2] - self.frame_width // 2,
+                )
+                half_height = max(
+                    half_height, self.frame_height // 2 - bounds[1],
+                    bounds[3] - self.frame_height // 2,
+                )
+
+        for tile in self.image_grid:
+            include(tile.getchannel("A").getbbox())
+        for body in self.action_points.values():
+            for point in body.all_pos():
+                half_width = max(half_width, -point.x, point.x + 1)
+                half_height = max(half_height, -point.y, point.y + 1)
+        if self.action_pt_image is not None:
+            grid = ImageGrid(self.action_pt_image, self.frame_width, self.frame_height)
+            for index, tile in enumerate(grid):
+                if (
+                    index in self.action_points
+                    and self.action_points[index] != self.loaded_action_points.get(index)
+                ):
+                    continue
+                include(tile.getchannel("A").getbbox())
+        # Always prefer even dimensions.
+        return (
+            min(self.frame_width, max(2, half_width * 2)),
+            min(self.frame_height, max(2, half_height * 2)),
+        )
+
+    def resized_frame_cells(self, width: int, height: int) -> SpriteDocument:
+        """Return a resized atlas, retaining each pixel's position around its origin."""
+        if width < 1 or height < 1:
+            msg = "Frame dimensions must be positive."
+            raise ValueError(msg)
+        dx = width // 2 - self.frame_width // 2
+        dy = height // 2 - self.frame_height // 2
+        clipped = set()
+        for index, tile in enumerate(self.image_grid):
+            bounds = tile.getchannel("A").getbbox()
+            if bounds and not (
+                bounds[0] + dx >= 0 and bounds[1] + dy >= 0
+                and bounds[2] + dx <= width and bounds[3] + dy <= height
+            ):
+                clipped.add(index)
+        for index, body in self.action_points.items():
+            if any(not (
+                0 <= point.x + width // 2 < width
+                and 0 <= point.y + height // 2 < height
+            ) for point in body.all_pos()):
+                clipped.add(index)
+        if self.action_pt_image is not None:
+            grid = ImageGrid(self.action_pt_image, self.frame_width, self.frame_height)
+            for index, tile in enumerate(grid):
+                if (
+                    index in self.action_points
+                    and self.action_points[index] != self.loaded_action_points.get(index)
+                ):
+                    # Save regenerates edited markers from the current points.
+                    continue
+                bounds = tile.getchannel("A").getbbox()
+                if bounds and not (
+                    bounds[0] + dx >= 0 and bounds[1] + dy >= 0
+                    and bounds[2] + dx <= width and bounds[3] + dy <= height
+                ):
+                    clipped.add(index)
+        if clipped:
+            frames = ", ".join(map(str, sorted(clipped)[:20]))
+            if len(clipped) > 20:
+                frames += ", ..."
+            msg = f"Resizing would cut off artwork or action points in frames: {frames}."
+            raise FormatError(msg)
+
+        def repack(image: Image.Image) -> Image.Image:
+            result = Image.new("RGBA", (
+                self.image_grid.columns * width, self.image_grid.rows * height,
+            ))
+            for index, tile in enumerate(ImageGrid(image, self.frame_width, self.frame_height)):
+                x = index % self.image_grid.columns * width
+                y = index // self.image_grid.columns * height
+                # Clip inside this cell when shrinking, never into its neighbor.
+                cell = Image.new("RGBA", (width, height))
+                cell.paste(tile, (dx, dy))
+                result.paste(cell, (x, y))
+            return result
+
+        document = copy.copy(self)
+        document.sheet_image = repack(self.sheet_image)
+        document.action_pt_image = (
+            repack(self.action_pt_image) if self.action_pt_image is not None else None
+        )
+        document.frame_width, document.frame_height = width, height
+        document.groups = copy.deepcopy(self.groups)
+        # Horizontal flipping uses the cell width.
+        correction = self.frame_width % 2 - width % 2
+        visited = set()
+        for group in document.groups:
+            for sequence in group.directions:
+                for frame in sequence.frames:
+                    if id(frame) not in visited:
+                        visited.add(id(frame))
+                        if frame.flip:
+                            frame.sprite_offset.x += correction
+        document.__post_init__()
+        return document
+
     @classmethod
     def load(cls, path, expected=None):
         path = pathlib.Path(path)

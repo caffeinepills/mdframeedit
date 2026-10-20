@@ -12,6 +12,7 @@ import os
 import pathlib
 import traceback
 import xml.etree.ElementTree as ElementTree
+from dataclasses import replace
 from functools import partial, wraps
 from hashlib import sha256
 from typing import TYPE_CHECKING, TypeVar
@@ -56,6 +57,7 @@ from gui.batchadd import ActionAliasDialog
 from gui.batchedit import BatchEditDialog
 from gui.editor import Ui_MainWindow
 from gui.info import SpriteInfoDialog
+from gui.resizeframes import ResizeFramesDialog
 from gui.textures import TopLeftGrid
 from utils import (
     Camera,
@@ -94,6 +96,25 @@ class SpriteEditCommand(QtGui.QUndoCommand):
             self.firstRedo = False
         else:
             self.editor.restoreEditState(self.after)
+
+
+class ResizeFramesCommand(SpriteEditCommand):
+    def __init__(
+        self, editor: AnimationEditor, before: EditState, after: EditState,
+        beforeDocument: SpriteDocument, afterDocument: SpriteDocument,
+    ) -> None:
+        super().__init__(editor, "Resize Frame Cells", before, after)
+        self.beforeDocument = beforeDocument
+        self.afterDocument = afterDocument
+
+    def undo(self) -> None:
+        self.editor.replaceSheetArtwork(self.beforeDocument)
+        super().undo()
+
+    def redo(self) -> None:
+        if not self.firstRedo:
+            self.editor.replaceSheetArtwork(self.afterDocument)
+        super().redo()
 
 
 EditResult = TypeVar("EditResult")
@@ -738,6 +759,13 @@ class AnimationEditor(AnimationSerialization):
         self.animationSettingsClipboard: AnimGroup | None = None
         self.editMenu.aboutToShow.connect(self.updateAnimationSettingsActions)
         self.editMenu.addSeparator()
+        self.resizeFramesAction = self.editMenu.addAction(
+            "Resize Frame Cells...", self.openResizeFrames
+        )
+        self.resizeFramesAction.setEnabled(False)
+        self.editMenu.aboutToShow.connect(
+            lambda: self.resizeFramesAction.setEnabled(self.sheet_image is not None)
+        )
         self.batchEditAction = self.editMenu.addAction(
             "Batch Edit Frames...", self.openBatchEdit
         )
@@ -880,6 +908,8 @@ class AnimationEditor(AnimationSerialization):
             button.setCheckable(True)
 
         self.ui.buttonDown.toggle()
+        self.ui.rotateLeftButton.clicked.connect(lambda: self.rotate_direction(-1))
+        self.ui.rotateRightButton.clicked.connect(lambda: self.rotate_direction(1))
 
         self.openGLWidget = self.ui.openGLWidget = PygletWidget(
             240, 220, self.ui.verticalFrame_3, self.window, self
@@ -986,6 +1016,53 @@ class AnimationEditor(AnimationSerialization):
             )),
         )
 
+    def openResizeFrames(self) -> None:
+        if self.sheet_image is None:
+            return
+        dialog = ResizeFramesDialog(self)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
+
+    def replaceSheetArtwork(self, document: SpriteDocument) -> None:
+        if self.openGLWidget.isValid():
+            self.openGLWidget.makeCurrent()
+
+        def previewImage(image: Image.Image | None) -> pyglet.image.ImageData | None:
+            if image is None:
+                return None
+            return pyglet.image.ImageData(
+                image.width, image.height, "RGBA", image.tobytes(), pitch=-image.width * 4
+            )
+
+        self.sheet_image = previewImage(document.sheet_image)
+        self.action_pt_image = previewImage(document.action_pt_image)
+        self.frame_width, self.frame_height = document.frame_width, document.frame_height
+        rows, columns = document.image_grid.rows, document.image_grid.columns
+        self.image_grid = TopLeftGrid(self.sheet_image, rows=rows, columns=columns)
+        self.action_grid = (
+            TopLeftGrid(self.action_pt_image, rows=rows, columns=columns)
+            if self.action_pt_image is not None else None
+        )
+        with QtCore.QSignalBlocker(self.ui.loadedSheetFrameList):
+            self.ui.loadedSheetFrameList.clear()
+            self.sheet_preview_images.clear()
+            self._add_frames_from_grid()
+
+    def resizeFrameCells(self, width: int, height: int) -> bool:
+        if (width, height) == (self.frame_width, self.frame_height):
+            return False
+        before = self.captureEditState()
+        original = self._sprite_document()
+        resized = original.resized_frame_cells(width, height)
+        self.replaceSheetArtwork(resized)
+        self.restoreEditState(replace(before, groups=resized.groups))
+        after = self.captureEditState()
+        self.undoStack.push(ResizeFramesCommand(self, before, after, original, resized))
+        self.ui.statusBar.showMessage(f"Frame cells resized to {width} x {height}. Save to update the files.", 5000)
+        return True
+
     def restoreEditState(self, state: EditState) -> None:
         """Restore metadata and selection while retaining preview preferences."""
         self.restoringEdit = True
@@ -1025,6 +1102,7 @@ class AnimationEditor(AnimationSerialization):
                 for group, signature in zip(self.groups, current[2]):
                     group.modified = (
                         current[:2] != self.savedEditSignature[:2]
+                        or current[4:] != self.savedEditSignature[4:]
                         or signature != savedGroups.get(signature[:2])
                         or any(
                             frame.frame_index in changedPoints
@@ -2196,6 +2274,11 @@ class AnimationEditor(AnimationSerialization):
                     self.set_anim_frame_values(self.current_anim_frame)
                     self.set_animation()
 
+    def rotate_direction(self, step: int) -> None:
+        """Turn through the direction pad, wrapping at either end."""
+        direction = (self.current_direction + step) % len(self.directionButtons)
+        self.directionButtons[direction].click()
+
     def set_direction(self, direction: int) -> None:
         if direction == self.current_direction:
             self.directionButtons[direction].toggle()
@@ -2977,7 +3060,10 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
             (index, tuple(point.data() for point in body.all_pos()))
             for index, body in sorted(editor.action_points.items())
         )
-        return (editor.shadow_size, editor.shadow_size_present, groups, points)
+        return (
+            editor.shadow_size, editor.shadow_size_present, groups, points,
+            editor.frame_width, editor.frame_height,
+        )
 
     def _create_document(self) -> tuple[QtWidgets.QWidget, AnimationEditor]:
         # Reuse the editor UI without embedding a second menu/status bar in a tab.

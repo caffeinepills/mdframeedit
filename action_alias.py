@@ -24,17 +24,23 @@ def add_action_aliases(
     action = action.strip()
     fallbacks = list(dict.fromkeys(name.strip() for name in fallbacks if name.strip()))
     if not source.is_dir():
-        raise ValueError("Choose an existing source folder.")
+        msg = "Choose an existing source folder."
+        raise ValueError(msg)
     if source == destination or source in destination.parents or destination in source.parents:
-        raise ValueError("The output folder must be separate from the source folder.")
+        msg = "The output folder must be separate from the source folder."
+        raise ValueError(msg)
     if destination.exists():
-        raise ValueError("Choose a new output folder; existing folders are never overwritten.")
+        msg = "Choose a new output folder; existing folders are never overwritten."
+        raise ValueError(msg)
     if not action or not fallbacks:
-        raise ValueError("Enter an action name and at least one fallback action.")
+        msg = "Enter an action name and at least one fallback action."
+        raise ValueError(msg)
     if action.casefold() in {name.casefold() for name in fallbacks}:
-        raise ValueError("The new action cannot be one of its own fallbacks.")
+        msg = "The new action cannot be one of its own fallbacks."
+        raise ValueError(msg)
     if index is not None and index < 0:
-        raise ValueError("The action index must be nonnegative or automatic.")
+        msg = "The action index must be nonnegative or automatic."
+        raise ValueError(msg)
 
     def scan_error(error: OSError) -> None:
         raise error
@@ -44,14 +50,16 @@ def add_action_aliases(
         for name in directories + names:
             path = Path(directory) / name
             if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
-                raise ValueError(f"Source contains a link or junction: {path}")
+                msg_0 = f"Source contains a link or junction: {path}"
+                raise ValueError(msg_0)
         files.extend(
             Path(directory) / name for name in names
             if name in {"FrameData.xml", "AnimData.xml"}
         )
     files.sort()
     if not files:
-        raise ValueError("No FrameData.xml or AnimData.xml files found in the source folder.")
+        msg = "No FrameData.xml or AnimData.xml files found in the source folder."
+        raise ValueError(msg)
 
     destination.mkdir(parents=True, exist_ok=False)
     log_path = destination / "action-alias.log"
@@ -76,7 +84,8 @@ def add_action_aliases(
         except Exception as error:
             writer.writerow(["", "COPY_ERROR", str(error)])
             log.flush()
-            raise OSError(f"Copy failed. Partial output and log retained at {log_path}: {error}") from error
+            msg_0 = f"Copy failed. Partial output and log retained at {log_path}: {error}"
+            raise OSError(msg_0) from error
 
         for original in files:
             relative = original.relative_to(source)
@@ -102,7 +111,8 @@ def _add_alias(path: Path, action: str, fallbacks: list[str], index: int | None)
     if root.find("FrameWidth") is None and (
         any(char in action for char in '/\\<>:"|?*') or action.endswith((".", " "))
     ):
-        raise FormatError(f"Action name cannot be used in AnimData.xml: {action!r}")
+        msg = f"Action name cannot be used in AnimData.xml: {action!r}"
+        raise FormatError(msg)
     exact_names = {anim.findtext("Name"): anim for anim in anims}
     for fallback in fallbacks:
         matches = [anim for name, anim in exact_names.items() if name.casefold() == fallback.casefold()]
@@ -110,7 +120,8 @@ def _add_alias(path: Path, action: str, fallbacks: list[str], index: int | None)
             selected = exact_names[fallback]
             break
         if len(matches) > 1:
-            raise FormatError(f"Ambiguous fallback {fallback!r}; use its exact spelling.")
+            msg = f"Ambiguous fallback {fallback!r}; use its exact spelling."
+            raise FormatError(msg)
         if matches:
             selected = matches[0]
             break
@@ -136,7 +147,7 @@ def _add_alias(path: Path, action: str, fallbacks: list[str], index: int | None)
             temporary = Path(output.name)
             tree.write(output, encoding="utf-8", xml_declaration=True)
         validate_source(temporary)
-        os.replace(temporary, path)
+        temporary.replace(path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

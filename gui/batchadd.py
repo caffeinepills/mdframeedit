@@ -89,5 +89,11 @@ class Ui_BatchCreateAction(object):
         self.label_3.setText(_translate("BatchCreateAction", "Fallback / Copy From"))
         self.label_4.setText(_translate("BatchCreateAction", "Index ID"))
         self.overwriteCheckbox.setText(_translate("BatchCreateAction", "Overwrite"))
-        self.openDirectory.setText(_translate("BatchCreateAction", "..."))
+        self.openDirectory.setIcon(self.openDirectory.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon))
+        self.openDirectory.setText(_translate("BatchCreateAction", "Browse..."))
+        self.openDirectory.setToolTip(_translate("BatchCreateAction", "Choose the folder containing the sprite files to update."))
+        self.finalizeButtonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Apply).setToolTip(
+            _translate("BatchCreateAction", "Apply the selected action to sprite files in this folder and its subfolders."))
+        self.finalizeButtonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Cancel).setToolTip(
+            _translate("BatchCreateAction", "Close without applying another batch change."))
         self.fullDataCheckbox.setText(_translate("BatchCreateAction", "Write Full Data"))

@@ -4,6 +4,10 @@ Frame editor to edit FrameData.xml/AnimData.xml sheets and see results live inst
 For an easier time, use existing FrameData or AnimData to use and modify. Also make sure the FrameWidth, FrameHeight XML datas are accurate for the sheet you are using.
 
 ### Controls
+* **Open / Ctrl+O** - Select one or several sprite XML files. Each sprite opens
+  in its own tab, named after its containing folder.
+* **Save / Save As / Export** - Apply to the active sprite tab. Each tab keeps
+  its edits, selection, zoom, and shadow preview independently.
 * **O** - Toggle Offset Display (Action Points), if loaded.
 * **S** - Toggle Shadow Display.
 * **Mouse Scroll** - Zoom in and Out of Preview. Zooming in follows the sprite's offsets as it animates.
@@ -14,6 +18,18 @@ For an easier time, use existing FrameData or AnimData to use and modify. Also m
 **Trim Copies**: Instead of writing full animation data, will instead write an Animation Action as CopyOf data. If your program doesn't handle this scenario, leave unchecked to write all frame data.
 
 **Collapse Singles**: If there is only one sequence that is the same for all 8 directions, it will save it as 1 sequence. If your program doesn't handle this scenario, leave unchecked to write all 8 sequences.
+
+### Running from source
+
+Use Python 3.9 or newer. From the project directory, activate your virtual
+environment and install the project and its dependencies:
+
+```shell
+python -m pip install -e ".[gui]"
+python main.py
+```
+
+Dependencies are declared in `pyproject.toml`.
 
 ### Building
 
@@ -76,3 +92,48 @@ If you don't trust the release versions, you can download the source and package
 
 
 ![img.png](img.png)
+
+### Command-line conversion
+
+Convert an XML file and its accompanying PNGs without opening the editor:
+
+```shell
+python main.py convert sprites/FrameData.xml --to multi --output converted/multi
+python main.py convert sprites/AnimData.xml --to single --output converted/single
+```
+
+Convert a folder tree with four parallel workers:
+
+```shell
+python main.py convert sprites --to single --output converted --recursive --jobs 4
+```
+
+Folder conversion finds `AnimData.xml` for `--to single`, or `FrameData.xml` for
+`--to multi`, and preserves each sprite's relative folder under the output folder.
+Without `--recursive`, only the input folder itself is searched. An output folder
+inside the input tree is excluded from the search. An explicit XML input may have
+a different filename; its format is detected from its contents. Keep its PNGs
+beside the source XML.
+
+Conversions default to multiprocessing with up to four workers. Use `--jobs` to
+change the worker count, or `--executor serial` to run without a worker pool.
+Conversions use the same Pillow/XML backend and transactional export as the
+editor, without importing Qt, pyglet, or GUI modules or changing application preferences.
+Sources are kept intact; choose a separate output folder. Destinations containing
+files require `--overwrite`; child sprite directories do not block parent exports.
+A failed sprite is reported while other sprites
+continue. Exit codes are 0 for success, 1 for conversion failures, and 2 for invalid
+arguments or input selection.
+
+Use `--no-trim-copies` to expand copy references, and `--no-collapse-singles` to
+write all eight directions. Both compact representations are enabled by default.
+For help, run `python main.py convert --help`.
+
+Installing the project also provides the equivalent console command:
+
+```shell
+mdframeedit-convert sprites --to multi --output converted --recursive --jobs 4
+```
+
+For CLI-only use, `python -m pip install -e .` installs just Pillow. Qt and pyglet
+are optional dependencies, installed with the `gui` extra shown above.

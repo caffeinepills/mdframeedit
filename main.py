@@ -13,6 +13,7 @@ import pathlib
 import traceback
 import xml.etree.ElementTree as ElementTree
 from functools import partial
+from hashlib import sha256
 from typing import TYPE_CHECKING
 
 import pyglet
@@ -788,6 +789,19 @@ class AnimationEditor(AnimationSerialization):
 
         self.settings = QSettings("MDFrameEditor", "Frame Editor")
         self.recent_files: list[str] = self.settings.value("recent", [], list)
+        self.artworkPath: pathlib.Path | None = None
+        # Hash for file change.
+        self.artworkDigest: bytes | None = None
+        self.artworkRetryCount = 0
+        self.artworkReloadEnabled = self.settings.value(
+            "preferences/autoReloadArtwork", False, bool
+        )
+        self.artworkWatcher = QtCore.QFileSystemWatcher(window)
+        self.artworkReloadTimer = QtCore.QTimer(window)
+        self.artworkReloadTimer.setSingleShot(True)
+        self.artworkReloadTimer.timeout.connect(self.reloadChangedArtwork)
+        self.artworkWatcher.fileChanged.connect(self.queueArtworkReload)
+        self.artworkWatcher.directoryChanged.connect(self.queueArtworkReload)
         self.ui.sheetFramePicture.includeWhitespace = self.settings.value(
             "preferences/includeWhitespace", False, bool
         )
@@ -1079,6 +1093,98 @@ class AnimationEditor(AnimationSerialization):
             self.ui.actionPointsOpacitySlider.value(),
         )
 
+    def setArtworkReloadEnabled(self, enabled: bool) -> None:
+        if self.artworkReloadEnabled == enabled:
+            return
+        self.artworkReloadEnabled = enabled
+        self.updateArtworkWatch()
+        if enabled:
+            self.queueArtworkReload()
+        else:
+            self.artworkReloadTimer.stop()
+
+    def updateArtworkWatch(self) -> None:
+        paths = self.artworkWatcher.files() + self.artworkWatcher.directories()
+        if paths:
+            self.artworkWatcher.removePaths(paths)
+        if self.artworkReloadEnabled and self.artworkPath is not None:
+            # Watching the directory also catches editors replacing the PNG.
+            paths = [str(self.artworkPath.parent)]
+            if self.artworkPath.exists():
+                paths.append(str(self.artworkPath))
+            self.artworkWatcher.addPaths(paths)
+
+    def trackArtwork(self) -> None:
+        self.artworkReloadTimer.stop()
+        self.artworkPath = None
+        self.artworkDigest = None
+        if self.sheet_format == SheetFormat.SINGLE and self.sheet_image is not None:
+            self.artworkPath = pathlib.Path(self.file_name).resolve().with_name("Anim.png")
+            self.artworkDigest = sha256(
+                self.sheet_image.get_data("RGBA", -self.sheet_image.width * 4)
+            ).digest()
+        self.updateArtworkWatch()
+
+    def queueArtworkReload(self, path: str = "") -> None:
+        if self.artworkReloadEnabled and self.artworkPath is not None:
+            self.artworkRetryCount = 0
+            self.artworkReloadTimer.start(300)
+
+    def reloadChangedArtwork(self) -> None:
+        if not self.artworkReloadEnabled or self.artworkPath is None:
+            return
+        try:
+            with Image.open(self.artworkPath) as source:
+                image = source.convert("RGBA")
+            pixels = image.tobytes()
+        except OSError:
+            # Saves may briefly leave an incomplete or missing file.
+            self.artworkRetryCount += 1
+            if self.artworkRetryCount <= 3:
+                self.artworkReloadTimer.start(500)
+            else:
+                self.ui.statusBar.showMessage(
+                    "Could not reload artwork. Keeping the current preview.", 5000
+                )
+            self.updateArtworkWatch()
+            return
+        self.updateArtworkWatch()
+        if image.size != (self.sheet_image.width, self.sheet_image.height):
+            self.ui.statusBar.showMessage(
+                "Artwork dimensions changed. Reopen the sheet to load its new layout.", 5000
+            )
+            return
+        digest = sha256(pixels).digest()
+        if digest == self.artworkDigest:
+            return
+        if self.openGLWidget.isValid():
+            self.openGLWidget.makeCurrent()
+        selected = self.selected_sheet_frame
+        scroll = self.ui.loadedSheetFrameList.verticalScrollBar().value()
+        self.sheet_image = pyglet.image.ImageData(
+            image.width, image.height, "RGBA", pixels, pitch=-image.width * 4
+        )
+        self.image_grid = TopLeftGrid(
+            self.sheet_image, rows=self.image_grid.rows, columns=self.image_grid.columns
+        )
+        with QtCore.QSignalBlocker(self.ui.loadedSheetFrameList):
+            self.ui.loadedSheetFrameList.clear()
+            self.sheet_preview_images.clear()
+            self._add_frames_from_grid()
+        self.selectSheetFrame(selected)
+        self.ui.loadedSheetFrameList.verticalScrollBar().setValue(scroll)
+        frame = self.displayed_anim_frame or self.current_anim_frame
+        if self.sprite is not None and frame is not None:
+            spriteImage = self.image_grid[frame.frame_index]
+            if frame.flip:
+                spriteImage = spriteImage.get_texture().get_transform(flip_x=True)
+                spriteImage.anchor_x = spriteImage.width // 2
+                spriteImage.anchor_y = spriteImage.height // 2
+            self.sprite.image = spriteImage
+        self.artworkDigest = digest
+        self.openGLWidget.update()
+        self.ui.statusBar.showMessage("Artwork reloaded.", 3000)
+
     def actionPointChanged(self, pointName: str, value: int) -> None:
         index = self.selected_sheet_frame
         if index is None:
@@ -1282,6 +1388,7 @@ class AnimationEditor(AnimationSerialization):
             return False
         self.file_name = str(target)
         self.loaded_tree = ElementTree.parse(target)
+        self.trackArtwork()
         self.shadow_size_present = (
             self.loaded_tree.getroot().find("ShadowSize") is not None
         )
@@ -1919,6 +2026,8 @@ class AnimationEditor(AnimationSerialization):
         )
         self.loaded_tree = document.source_tree
         self.sheet_format = document.sheet_format
+        modeName = "Single" if document.sheet_format == SheetFormat.SINGLE else "Multi"
+        self.ui.groupBox_5.setTitle(f"Sprite Sheet ({modeName})")
         self.single_loaded = document.sheet_format == SheetFormat.SINGLE
         self.shadow_size = document.shadow_size
         self.shadow_size_present = document.shadow_size_present
@@ -1938,6 +2047,7 @@ class AnimationEditor(AnimationSerialization):
         for group in self.groups:
             self.ui.actionListWidget.addItem(AnimGroupItem(group, self))
         self.add_recent_list(file_name)
+        self.trackArtwork()
         if expected == SheetFormat.SINGLE and self.batch_add_implem:
             self.batch_add_implem.loaded_frame_data()
         self.ui.statusBar.showMessage(
@@ -2005,6 +2115,11 @@ class AnimationEditor(AnimationSerialization):
 
     def clear(self) -> None:
         """Clear everything so we can load a new sprite."""
+        self.ui.groupBox_5.setTitle("Sprite Sheet")
+        self.artworkReloadTimer.stop()
+        self.artworkPath = None
+        self.artworkDigest = None
+        self.updateArtworkWatch()
         self.sheet_preview_images.clear()
         self.single_loaded = None
         self.sheet_image = None
@@ -2367,6 +2482,12 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         for name, text, default, menu in (
             ("rememberWindowSize", "Remember Window Size", True, self.settingsMenu),
             ("cameraLocked", "Lock Camera", True, self.settingsMenu),
+            (
+                "autoReloadArtwork",
+                "Auto Reload Artwork (Single Sheet)",
+                False,
+                self.settingsMenu,
+            ),
             ("showSpriteBounds", "Show Sprite Dimensions", False, self.viewMenu),
             ("includeWhitespace", "Include Sprite Whitespace", False, self.viewMenu),
         ):
@@ -2386,6 +2507,9 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         self.settings.sync()
 
     def _applyPreviewPreferences(self, editor: AnimationEditor) -> None:
+        editor.setArtworkReloadEnabled(
+            self.preferenceActions["autoReloadArtwork"].isChecked()
+        )
         showBounds = self.preferenceActions["showSpriteBounds"].isChecked()
         preview = editor.ui.sheetFramePicture
         preview.showBounds = showBounds
@@ -2396,6 +2520,13 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         editor.openGLWidget.showSpriteBounds = showBounds
         editor.openGLWidget.setCameraLocked(
             self.preferenceActions["cameraLocked"].isChecked()
+        )
+
+    def updateArtworkReloadAction(self) -> None:
+        """Enable the reload preference only for an active single-sheet document."""
+        editor = self.current_editor
+        self.preferenceActions["autoReloadArtwork"].setEnabled(
+            editor is not None and editor.sheet_format == SheetFormat.SINGLE
         )
 
     def _restoreVisiblePanelLayout(self) -> None:
@@ -2531,6 +2662,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         self._update_tab(page)
         self.documentTabs.setCurrentWidget(page)
         self._document_status(editor, editor.ui.statusBar.currentMessage())
+        self.updateArtworkReloadAction()
         return editor
 
     def _update_tab(self, page: QtWidgets.QWidget) -> None:
@@ -2576,6 +2708,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(f"{name} - {title}" if name else title)
 
     def _activate_document(self, index: int) -> None:
+        self.updateArtworkReloadAction()
         if self._active_editor is not None:
             self._capturePanelLayout(self._active_editor)
             self._active_editor.openGLWidget.timer.stop()
@@ -2661,6 +2794,9 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
 
     def _dispose_document(self, page: QtWidgets.QWidget) -> None:
         editor = self._editors.pop(page)
+        editor.setArtworkReloadEnabled(False)
+        editor.artworkWatcher.deleteLater()
+        editor.artworkReloadTimer.deleteLater()
         editor.openGLWidget.timer.stop()
         pyglet.clock.unschedule(editor._playing_animation)
         if editor.newWindow is not None:

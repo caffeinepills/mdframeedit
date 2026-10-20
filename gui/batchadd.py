@@ -51,7 +51,7 @@ class ActionAliasDialog(QtWidgets.QDialog):
         ):
             row = QtWidgets.QHBoxLayout()
             row.addWidget(edit)
-            button = QtWidgets.QPushButton("Browse…")
+            button = QtWidgets.QPushButton("Browse...")
             button.clicked.connect(callback)
             row.addWidget(button)
             form.addRow(label, row)
@@ -129,7 +129,7 @@ class ActionAliasDialog(QtWidgets.QDialog):
         self.applyButton.setEnabled(False)
         self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Close).setEnabled(False)
         self.logButton.setEnabled(False)
-        self.statusLabel.setText("Copying sprite files and adding missing aliases…")
+        self.statusLabel.setText("Copying sprite files and adding missing aliases...")
         self.worker = AliasWorker(
             self, self.sourceEdit.text().strip(), self.outputEdit.text().strip(),
             self.actionEdit.text(), self.fallbackEdit.toPlainText().splitlines(),

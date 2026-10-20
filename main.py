@@ -57,7 +57,7 @@ from gui.batchadd import ActionAliasDialog
 from gui.batchedit import BatchEditDialog
 from gui.editor import Ui_MainWindow
 from gui.info import SpriteInfoDialog
-from gui.resizeframes import ResizeFramesDialog
+from gui.celledit import ResizeFramesDialog
 from gui.textures import TopLeftGrid
 from utils import (
     Camera,
@@ -103,7 +103,7 @@ class ResizeFramesCommand(SpriteEditCommand):
         self, editor: AnimationEditor, before: EditState, after: EditState,
         beforeDocument: SpriteDocument, afterDocument: SpriteDocument,
     ) -> None:
-        super().__init__(editor, "Resize Frame Cells", before, after)
+        super().__init__(editor, "Edit Frame Cells", before, after)
         self.beforeDocument = beforeDocument
         self.afterDocument = afterDocument
 
@@ -488,15 +488,31 @@ class PygletWidget(QOpenGLWidget):
                 sprite.height,
                 color=(255, 220, 0),
                 batch=self.batch,
-                group=pyglet.graphics.Group(3),
+                group=pyglet.graphics.Group(4),
             )
+        zoom = self.camera.zoom
+        viewport = (pyglet.gl.GLint * 4)()
+        pyglet.gl.glGetIntegerv(pyglet.gl.GL_VIEWPORT, viewport)
+        scale_x = viewport[2] / max(1, self.width())
+        scale_y = viewport[3] / max(1, self.height())
+        zoom_x, zoom_y = zoom * scale_x, zoom * scale_y
+        left = sprite.x - sprite.image.anchor_x * sprite.scale * sprite.scale_x
+        bottom = sprite.y - sprite.image.anchor_y * sprite.scale * sprite.scale_y
+        origin_x = viewport[0] + (self.width() // 2) * scale_x
+        origin_y = viewport[1] + (self.height() // 3) * scale_y
+        # Snap all four outer edges in screen space. Inverse zoom alone keeps
+        # the nominal thickness constant but leaves edges between pixel boundaries.
+        screen_left = round((left - self.camera.x) * zoom_x + origin_x)
+        screen_bottom = round((bottom - self.camera.y) * zoom_y + origin_y)
+        screen_right = max(screen_left + 1, round((left + sprite.width - self.camera.x) * zoom_x + origin_x))
+        screen_top = max(screen_bottom + 1, round((bottom + sprite.height - self.camera.y) * zoom_y + origin_y))
         self.spriteBounds.position = (
-            sprite.x - sprite.image.anchor_x * sprite.scale * sprite.scale_x,
-            sprite.y - sprite.image.anchor_y * sprite.scale * sprite.scale_y,
+            (screen_left - origin_x) / zoom_x + self.camera.x,
+            (screen_bottom - origin_y) / zoom_y + self.camera.y,
         )
-        self.spriteBounds.width = sprite.width
-        self.spriteBounds.height = sprite.height
-        self.spriteBounds.thickness = 1 / self.camera.zoom
+        self.spriteBounds.width = (screen_right - screen_left) / zoom_x
+        self.spriteBounds.height = (screen_top - screen_bottom) / zoom_y
+        self.spriteBounds.thickness = 1 / max(zoom_x, zoom_y)
         self.spriteBounds.visible = True
 
     def resizeGL(self, width: int, height: int) -> None:
@@ -525,9 +541,11 @@ class PygletWidget(QOpenGLWidget):
         ]
 
         if self.editor.sprite:
-            self.editor.sprite.position = self.editor.get_sprite_position()
-            self.editor.shadow.position = self.editor.get_shadow_position()
-            self.editor.updateActionPointPreview(self.editor.current_anim_frame)
+            frame = self.editor.displayed_anim_frame or self.editor.current_anim_frame
+            self.editor.sprite.position = self.editor.get_sprite_position(frame)
+            self.editor.shadow.position = self.editor.get_shadow_position(frame)
+            self.editor.updateActionPointPreview(frame)
+            self.editor.updateOnionPreview(frame)
         elif self._restore_preview:
             self._restore_preview = False
             self.editor.set_animation()
@@ -623,7 +641,7 @@ class PygletWidget(QOpenGLWidget):
                     remember_texture(getattr(image, name, None))
                     if hasattr(image, name):
                         setattr(image, name, None)
-        for sprite in (editor.sprite, editor.shadow, *editor.ap_sprites):
+        for sprite in (editor.sprite, editor.shadow, *editor.ap_sprites, *editor.onionSprites):
             if sprite is not None:
                 remember_texture(sprite.image)
                 sprite.delete()
@@ -631,6 +649,7 @@ class PygletWidget(QOpenGLWidget):
         editor.left_hand = editor.center = editor.right_hand = editor.head = None
         editor.shadow_point = None
         editor.ap_sprites.clear()
+        editor.onionSprites.clear()
         for line in self.lines:
             line.delete()
         self.lines.clear()
@@ -780,7 +799,7 @@ class AnimationEditor(AnimationSerialization):
         self.editMenu.aboutToShow.connect(self.updateActionPointActions)
         self.editMenu.addSeparator()
         self.resizeFramesAction = self.editMenu.addAction(
-            "Resize Frame Cells...", self.openResizeFrames
+            "Edit Frame Cells...", self.openResizeFrames
         )
         self.resizeFramesAction.setEnabled(False)
         self.editMenu.aboutToShow.connect(
@@ -888,6 +907,7 @@ class AnimationEditor(AnimationSerialization):
         # Set when opened for non-XML access.
         self.frame_width = 0
         self.frame_height = 0
+        self.cell_edit_revision = 0
         self.shadow_size = 0
 
         self.copied_sequence: AnimationSequence | None = None
@@ -897,6 +917,11 @@ class AnimationEditor(AnimationSerialization):
         self.current_sequence: AnimationSequence | None = None
         self.current_anim_frame: AnimFrame | None = None
         self.displayed_anim_frame: AnimFrame | None = None
+        self.onionSprites: list[pyglet.sprite.Sprite] = []
+        self.onionPreviewEnabled = self.settings.value("preferences/onionPreview", False, bool)
+        self.onionPreviousFrames = max(0, min(5, self.settings.value("preferences/onionPreviousFrames", 1, int)))
+        self.onionNextFrames = max(0, min(5, self.settings.value("preferences/onionNextFrames", 1, int)))
+        self.onionOpacity = max(0, min(255, self.settings.value("preferences/onionOpacity", 72, int)))
         self.current_anim_group: AnimGroup | None = None
 
         self.ui.actionLoad.triggered.connect(lambda: self._load_animation_dialog())
@@ -981,6 +1006,12 @@ class AnimationEditor(AnimationSerialization):
         self.ui.animationSpeedSlider.valueChanged.connect(
             lambda: self.change_animation_speed()
         )
+        self.ui.onionPreviewCheckBox.setChecked(self.onionPreviewEnabled)
+        self.ui.onionPreviewCheckBox.toggled.connect(self.changeOnionPreview)
+        self.setOnionRange(-self.onionPreviousFrames, self.onionNextFrames)
+        self.ui.onionRangeSlider.rangeChanged.connect(self.changeOnionRange)
+        self.setOnionOpacity(self.onionOpacity)
+        self.ui.onionOpacitySlider.valueChanged.connect(self.changeOnionOpacity)
 
         self.ui.actionAddButton.clicked.connect(lambda: self.open_add_action())
         self.ui.actionDuplicateButton.clicked.connect(lambda: self.duplicate_action())
@@ -1048,6 +1079,7 @@ class AnimationEditor(AnimationSerialization):
     def replaceSheetArtwork(self, document: SpriteDocument) -> None:
         if self.openGLWidget.isValid():
             self.openGLWidget.makeCurrent()
+        self.clearOnionPreview()
 
         def previewImage(image: Image.Image | None) -> pyglet.image.ImageData | None:
             if image is None:
@@ -1059,6 +1091,7 @@ class AnimationEditor(AnimationSerialization):
         self.sheet_image = previewImage(document.sheet_image)
         self.action_pt_image = previewImage(document.action_pt_image)
         self.frame_width, self.frame_height = document.frame_width, document.frame_height
+        self.cell_edit_revision = document.cell_edit_revision
         rows, columns = document.image_grid.rows, document.image_grid.columns
         self.image_grid = TopLeftGrid(self.sheet_image, rows=rows, columns=columns)
         self.action_grid = (
@@ -1070,17 +1103,19 @@ class AnimationEditor(AnimationSerialization):
             self.sheet_preview_images.clear()
             self._add_frames_from_grid()
 
-    def resizeFrameCells(self, width: int, height: int) -> bool:
-        if (width, height) == (self.frame_width, self.frame_height):
+    def resizeFrameCells(self, width: int, height: int, *, centerArtwork: bool = False) -> bool:
+        if (width, height) == (self.frame_width, self.frame_height) and not centerArtwork:
             return False
         before = self.captureEditState()
         original = self._sprite_document()
-        resized = original.resized_frame_cells(width, height)
+        resized = original.resized_frame_cells(width, height, center_artwork=centerArtwork)
+        if resized is original:
+            return False
         self.replaceSheetArtwork(resized)
-        self.restoreEditState(replace(before, groups=resized.groups))
+        self.restoreEditState(replace(before, groups=resized.groups, action_points=resized.action_points))
         after = self.captureEditState()
         self.undoStack.push(ResizeFramesCommand(self, before, after, original, resized))
-        self.ui.statusBar.showMessage(f"Frame cells resized to {width} x {height}. Save to update the files.", 5000)
+        self.ui.statusBar.showMessage(f"Frame cells updated ({width} x {height}). Save to update the files.", 5000)
         return True
 
     def restoreEditState(self, state: EditState) -> None:
@@ -1350,6 +1385,7 @@ class AnimationEditor(AnimationSerialization):
                 spriteImage.anchor_y = spriteImage.height // 2
             self.sprite.image = spriteImage
         self.artworkDigest = digest
+        self.updateOnionPreview(frame)
         self.openGLWidget.update()
         self.ui.statusBar.showMessage("Artwork reloaded.", 3000)
 
@@ -2208,7 +2244,6 @@ class AnimationEditor(AnimationSerialization):
 
         self.anim_speed = (1 / 60.0) / new_speed
 
-        self.ui.animationSpeedLabel.setText(f"{new_speed}x")
 
     @undoable("Change Frame Duration")
     def duration_changed(self) -> None:
@@ -2389,6 +2424,10 @@ class AnimationEditor(AnimationSerialization):
         """Clears information boxes of the Frame Data."""
         self.current_anim_frame = None
         self.displayed_anim_frame = None
+        if self.onionSprites:
+            self.openGLWidget.makeCurrent()
+        for sprite in self.onionSprites:
+            sprite.visible = False
         self.syncActionPointControls(None)
 
         self.ui.animationFrameList.clear()
@@ -2544,6 +2583,7 @@ class AnimationEditor(AnimationSerialization):
             document.frame_width,
             document.frame_height,
         )
+        self.cell_edit_revision = document.cell_edit_revision
         self.loaded_tree = document.source_tree
         self.sheet_format = document.sheet_format
         modeName = "Single" if document.sheet_format == SheetFormat.SINGLE else "Multi"
@@ -2634,6 +2674,7 @@ class AnimationEditor(AnimationSerialization):
 
     def clear(self) -> None:
         """Clear everything so we can load a new sprite."""
+        self.clearOnionPreview()
         self.undoStack.clear()
         self.savedEditSignature = None
         self.ui.groupBox_5.setTitle("Sprite Sheet")
@@ -2677,21 +2718,23 @@ class AnimationEditor(AnimationSerialization):
 
         self.ui.sheetFramePicture.clear()
 
-    def get_sprite_position(self) -> tuple[float, float, float]:
+    def get_sprite_position(self, anim_frame: AnimFrame | None = None) -> tuple[float, float, float]:
+        anim_frame = anim_frame or self.current_anim_frame
         return (
             (self.openGLWidget.width() // 2)
-            + (self.current_anim_frame.sprite_offset.x * self.scale),
+            + (anim_frame.sprite_offset.x * self.scale),
             (self.openGLWidget.height() // 3)
-            + (-self.current_anim_frame.sprite_offset.y * self.scale),
+            + (-anim_frame.sprite_offset.y * self.scale),
             0,
         )
 
-    def get_shadow_position(self) -> tuple[float, float, float]:
+    def get_shadow_position(self, anim_frame: AnimFrame | None = None) -> tuple[float, float, float]:
+        anim_frame = anim_frame or self.current_anim_frame
         return (
             (self.openGLWidget.width() // 2)
-            + (self.current_anim_frame.shadow_offset.x * self.scale),
+            + (anim_frame.shadow_offset.x * self.scale),
             (self.openGLWidget.height() // 3)
-            + (-self.current_anim_frame.shadow_offset.y * self.scale),
+            + (-anim_frame.shadow_offset.y * self.scale),
             0,
         )
 
@@ -2744,7 +2787,7 @@ class AnimationEditor(AnimationSerialization):
                 marker = pyglet.sprite.Sprite(
                     self.action_point_marker,
                     batch=self.openGLWidget.batch,
-                    group=pyglet.graphics.Group(3 if name == "center" else 2),
+                    group=pyglet.graphics.Group(4 if name == "center" else 3),
                 )
                 marker.color = color
                 marker.scale = self.scale
@@ -2758,6 +2801,105 @@ class AnimationEditor(AnimationSerialization):
                     position is not None
                     and self.ui.showActionPointsCheckBox.isChecked()
                 )
+
+    def setOnionPreviewEnabled(self, enabled: bool) -> None:
+        self.onionPreviewEnabled = enabled
+        with QtCore.QSignalBlocker(self.ui.onionPreviewCheckBox):
+            self.ui.onionPreviewCheckBox.setChecked(enabled)
+        self.updateOnionPreview(self.displayed_anim_frame or self.current_anim_frame)
+        self.openGLWidget.update()
+
+    def changeOnionPreview(self, enabled: bool) -> None:
+        self.settings.setValue("preferences/onionPreview", enabled)
+        editors = self.document_host._editors.values() if self.document_host else (self,)
+        for editor in editors:
+            editor.setOnionPreviewEnabled(enabled)
+        self.settings.sync()
+
+    def setOnionRange(self, lower: int, upper: int) -> None:
+        self.onionPreviousFrames = max(0, min(5, -lower))
+        self.onionNextFrames = max(0, min(5, upper))
+        with QtCore.QSignalBlocker(self.ui.onionRangeSlider):
+            self.ui.onionRangeSlider.setValues(-self.onionPreviousFrames, self.onionNextFrames)
+        self.ui.onionRangeLabel.setText(f"{-self.onionPreviousFrames} to +{self.onionNextFrames}")
+        self.updateOnionPreview(self.displayed_anim_frame or self.current_anim_frame)
+        self.openGLWidget.update()
+
+    def changeOnionRange(self, lower: int, upper: int) -> None:
+        self.settings.setValue("preferences/onionPreviousFrames", -lower)
+        self.settings.setValue("preferences/onionNextFrames", upper)
+        editors = self.document_host._editors.values() if self.document_host else (self,)
+        for editor in editors:
+            editor.setOnionRange(lower, upper)
+        self.settings.sync()
+
+    def setOnionOpacity(self, opacity: int) -> None:
+        self.onionOpacity = max(0, min(255, opacity))
+        with QtCore.QSignalBlocker(self.ui.onionOpacitySlider):
+            self.ui.onionOpacitySlider.setValue(self.onionOpacity)
+        self.ui.onionOpacityLabel.setText(f"{round(self.onionOpacity * 100 / 255)}%")
+        self.updateOnionPreview(self.displayed_anim_frame or self.current_anim_frame)
+        self.openGLWidget.update()
+
+    def changeOnionOpacity(self, opacity: int) -> None:
+        self.settings.setValue("preferences/onionOpacity", opacity)
+        editors = self.document_host._editors.values() if self.document_host else (self,)
+        for editor in editors:
+            editor.setOnionOpacity(opacity)
+        self.settings.sync()
+
+    def clearOnionPreview(self) -> None:
+        if self.onionSprites:
+            self.openGLWidget.makeCurrent()
+            for sprite in self.onionSprites:
+                sprite.delete()
+            self.onionSprites.clear()
+
+    def onionPreviewNeighbors(self, frame: AnimFrame | None) -> list[tuple[AnimFrame, int]]:
+        if not self.onionPreviewEnabled or self.current_sequence is None:
+            return []
+        frames = self.current_sequence.frames
+        index = next((i for i, item in enumerate(frames) if item is frame), None)
+        if index is None or len(frames) < 2:
+            return []
+        offsets = [*range(-self.onionPreviousFrames, 0), *range(1, self.onionNextFrames + 1)]
+        neighbors = []
+        seen = {index}
+        for offset in sorted(offsets, key=lambda value: (abs(value), value)):
+            neighbor = (index + offset) % len(frames)
+            if neighbor not in seen:
+                seen.add(neighbor)
+                neighbors.append((frames[neighbor], abs(offset)))
+        return neighbors
+
+    def onionPreviewFrames(self, frame: AnimFrame | None) -> list[AnimFrame]:
+        return [neighbor for neighbor, _ in self.onionPreviewNeighbors(frame)]
+
+    def updateOnionPreview(self, frame: AnimFrame | None) -> None:
+        if not self.openGLWidget.isValid() or self.openGLWidget._pyglet_context is None:
+            return
+        self.openGLWidget.makeCurrent()
+        neighbors = self.onionPreviewNeighbors(frame)
+        for index, (neighbor, distance) in enumerate(neighbors):
+            image = self.image_grid[neighbor.frame_index]
+            if neighbor.flip:
+                image = image.get_texture().get_transform(flip_x=True)
+                image.anchor_x = image.width // 2
+                image.anchor_y = image.height // 2
+            if index == len(self.onionSprites):
+                sprite = pyglet.sprite.Sprite(
+                    image, batch=self.openGLWidget.batch, group=pyglet.graphics.Group(1)
+                )
+                sprite.color = (190, 190, 190)
+                self.onionSprites.append(sprite)
+            sprite = self.onionSprites[index]
+            sprite.image = image
+            sprite.position = self.get_sprite_position(neighbor)
+            sprite.scale = self.scale
+            sprite.opacity = round(self.onionOpacity / distance)
+            sprite.visible = True
+        for sprite in self.onionSprites[len(neighbors):]:
+            sprite.visible = False
 
     def _playing_animation(self, dt: float) -> None:
         self.openGLWidget.makeCurrent()
@@ -2834,7 +2976,7 @@ class AnimationEditor(AnimationSerialization):
                         x=sprite_pos[0],
                         y=sprite_pos[1],
                         batch=self.openGLWidget.batch,
-                        group=pyglet.graphics.Group(1),
+                        group=pyglet.graphics.Group(2),
                     )
                     self.sprite.scale = self.scale
                     self.sprite.opacity = self.ui.spriteOpacitySlider.value()
@@ -2861,10 +3003,11 @@ class AnimationEditor(AnimationSerialization):
 
             self.sprite.image = image
 
-            self.sprite.position = self.get_sprite_position()
-            self.shadow.position = self.get_shadow_position()
+            self.sprite.position = self.get_sprite_position(anim_frame)
+            self.shadow.position = self.get_shadow_position(anim_frame)
 
             self.updateActionPointPreview(anim_frame)
+            self.updateOnionPreview(anim_frame)
 
     def import_multiple_sheets(self, file_name: str | PathLike[str]) -> bool:
         return self._load_sprite_document(file_name, SheetFormat.MULTI)
@@ -2905,6 +3048,7 @@ class AnimationEditor(AnimationSerialization):
             shadow_size_present=self.shadow_size_present,
             loaded_shadow_size=self.loaded_shadow_size,
             loaded_action_points=self.loaded_action_points,
+            cell_edit_revision=self.cell_edit_revision,
             trim_copies=self.ui.actionTrim_Copies.isChecked(),
             collapse_singles=self.ui.actionCollapse_Singles.isChecked(),
         )
@@ -3008,7 +3152,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
             ("cameraLocked", "Lock Camera", True, self.settingsMenu),
             (
                 "autoReloadArtwork",
-                "Auto Reload Artwork",
+                "Auto Reload Sheet",
                 False,
                 self.settingsMenu,
             ),
@@ -3063,6 +3207,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         editor.openGLWidget.setCameraLocked(
             self.preferenceActions["cameraLocked"].isChecked()
         )
+        editor.setOnionPreviewEnabled(self.settings.value("preferences/onionPreview", False, bool))
 
     def updateArtworkReloadAction(self) -> None:
         """Enable the reload preference only for an active single-sheet document."""
@@ -3138,6 +3283,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         return (
             editor.shadow_size, editor.shadow_size_present, groups, points,
             editor.frame_width, editor.frame_height,
+            editor.cell_edit_revision,
         )
 
     def _create_document(self) -> tuple[QtWidgets.QWidget, AnimationEditor]:

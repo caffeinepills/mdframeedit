@@ -9,14 +9,49 @@ For an easier time, use existing FrameData or AnimData to use and modify. Also m
 * **Save / Save As / Export** - Apply to the active sprite tab. Each tab keeps
   its edits, selection, zoom, and shadow preview independently.
 * **Undo / Redo** - Available under Edit or standard keyboard shortcuts. (History works per tab)
+* **Copy / Paste Action Points** - Select a sprite sheet frame, then use Edit or
+  right-click the frame list. Copies the head, center and both hands. Works between
+  tabs. Ctrl/Cmd+C and V also work while the sheet frame list is focused.
+* **Copy / Paste Animation Settings** - Under Edit. Copy timing, sprite/shadow
+  offsets, and rush/hit/return frames between actions or tabs. Frame counts must
+  match in every direction.
 * **O** - Toggle Offset Display (Action Points), if loaded.
 * **S** - Toggle Shadow Display.
 * **Mouse Scroll** - Zoom in and Out of Preview. Zooming in follows the sprite's offsets as it animates.
 * **Hold Ctrl + Mouse Scroll** - Adjust opacity of loaded sprite.
+* **Edit Frame Cells** - Add or reduce whitespace around the frame cells. Useful if you need to add additional space from needing a larger frame.
+  * Also supports centering artwork in the frames after.
+  * Use Trim Extra Space to clamp around the max artwork size.
+  * Center artwork in each cell tidies the sheet.
+  * Automatically adjusts the offsets and action points from this operation.
+
+* **Batch Edit Frames** - Allows applying offsets to frames in a selection, direction, or throughout the action.
 
 # Settings
 
-**Auto Reload Artwork** is available under Settings. When enabled, changes to `Anim.png` show up automatically without losing your frame or action point edits. If the image dimensions change, reopen the sheet to load the new layout.
+* **Remember Window Size** - In-case you like a specific layout, you can make it persist between application launches.
+
+* **Lock Camera** - Stops following the sprite preview, allowing click drag to move the camera view around.
+
+* **Auto Reload Sheet** - If a change occurs to the Anim.png it will automatically update your frames. Only supported in single sheet mode.
+
+# View
+
+* **Show Sprite Dimensions** - Shows a yellow outline showing the dimensions of the current frame, with whitespace.
+
+* **Include Sprite Whitespace** - The sheet frame preview will factor in it's white space when fitting to the widget.
+
+* **View > Info...** Displays generic frame and sheet information including frame size and palette information.
+
+
+# Preview
+
+* **Timeline** - Play the animation or drag between frames to see the animation as you build it.
+
+* **Animation Speed** - Adjust the animation speed to control how fast the animation plays back.
+
+* **Onion** - Slider to show previous or next frames in an animation. This can help with figuring out where your current frame should be placed.
+
 
 # Save Options
 
@@ -49,18 +84,24 @@ Downloads for Windows, MacOs, and Linux (untested) are provided.
 
 ## 2.0
 
-**New**
+** New **
 
 * Can now open multiple sprites in separate tabs.
-* Undo and redo changes to actions, frames, offsets, action points, and shadow size.
 * Option to automatically reload changed artwork in single-sheet mode.
 * Now able to modify the sprite action points.
+* Option to copy/paste an action from one tab to another (if compatible).
+* Can copy/paste action point values between frames.
+* Dialog to view sheet information, including palette.
+* Add option to resize and center frames to trim whitespace or extend it.
+* Add Onion view to better see how the animation progresses at once.
+* Add left and right rotate buttons.
+* Undo and redo support.
 * Able to adjust opacity for sprites, shadows, and action points.
-* Now can set the shadow size within and preview the size.
+* Now can set the shadow size within the tool, and preview the size.
 * You can now unlock the camera for dragging.
-* Remember window size, panel sizes, and preview preferences.
 * New app icon.
 * CLI options for single-sheet and multi-sheet conversions.
+* Remember window size, panel sizes, and preview preferences.
 
 **Fixed**
 

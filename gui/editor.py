@@ -231,6 +231,155 @@ class ClickableSlider(QtWidgets.QSlider):
         super().mousePressEvent(event)
 
 
+class OnionRangeSlider(QtWidgets.QWidget):
+    """Two integer handles constrained to opposite sides of the current frame."""
+
+    rangeChanged = QtCore.Signal(int, int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.lowerValue = -1
+        self.upperValue = 1
+        self.limit = 5
+        self.activeHandle = "lower"
+        self.dragging = False
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.setAccessibleName("Onion skin frame range")
+        self.setAccessibleDescription(
+            "Left and right arrows adjust the active handle. Up selects next frames; "
+            "Down selects previous frames. Zero is the current frame."
+        )
+
+    def sizeHint(self):
+        return QtCore.QSize(self.fontMetrics().height() * 13, self.minimumSizeHint().height())
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(
+            self.fontMetrics().horizontalAdvance("-5") * 5 + 20,
+            self.style().pixelMetric(QtWidgets.QStyle.PixelMetric.PM_SliderThickness) + 8,
+        )
+
+    def setValues(self, lower, upper):
+        lower = max(-self.limit, min(0, int(lower)))
+        upper = min(self.limit, max(0, int(upper)))
+        if (lower, upper) != (self.lowerValue, self.upperValue):
+            self.lowerValue, self.upperValue = lower, upper
+            self.setAccessibleDescription(
+                f"{abs(lower)} previous frames, {upper} next frames. "
+                "Left/Right adjust. Up selects next; Down selects previous."
+            )
+            self.rangeChanged.emit(lower, upper)
+            self.update()
+
+    def sliderOption(self, value=0):
+        option = QtWidgets.QStyleOptionSlider()
+        option.initFrom(self)
+        height = self.style().pixelMetric(QtWidgets.QStyle.PixelMetric.PM_SliderThickness) + 4
+        option.rect = QtCore.QRect(0, 0, self.width(), height)
+        option.orientation = Qt.Orientation.Horizontal
+        option.minimum, option.maximum = -self.limit, self.limit
+        option.sliderPosition = option.sliderValue = value
+        option.tickPosition = QtWidgets.QSlider.TickPosition.NoTicks
+        return option
+
+    def handleRect(self, value):
+        return self.style().subControlRect(
+            QtWidgets.QStyle.ComplexControl.CC_Slider, self.sliderOption(value),
+            QtWidgets.QStyle.SubControl.SC_SliderHandle, self,
+        )
+
+    def valueAt(self, position):
+        start = self.handleRect(-self.limit).center().x()
+        end = self.handleRect(self.limit).center().x()
+        return QtWidgets.QStyle.sliderValueFromPosition(
+            -self.limit, self.limit, round(position - start), max(1, end - start)
+        )
+
+    def moveHandle(self, value):
+        self.setValues(
+            value if self.activeHandle == "lower" else self.lowerValue,
+            value if self.activeHandle == "upper" else self.upperValue,
+        )
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return super().mousePressEvent(event)
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        x = event.position().x()
+        left = self.handleRect(self.lowerValue).center().x()
+        right = self.handleRect(self.upperValue).center().x()
+        if left == right:
+            self.activeHandle = "lower" if x < left else "upper"
+        else:
+            self.activeHandle = "lower" if abs(x - left) < abs(x - right) else "upper"
+        self.dragging = True
+        self.moveHandle(self.valueAt(x))
+        event.accept()
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        if self.dragging:
+            self.moveHandle(self.valueAt(event.position().x()))
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.dragging:
+            self.dragging = False
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            self.activeHandle = "upper" if key == Qt.Key.Key_Up else "lower"
+        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            value = self.lowerValue if self.activeHandle == "lower" else self.upperValue
+            self.moveHandle(value + (1 if key == Qt.Key.Key_Right else -1))
+        elif key in (Qt.Key.Key_Home, Qt.Key.Key_End):
+            self.moveHandle(-self.limit if key == Qt.Key.Key_Home else self.limit)
+        else:
+            return super().keyPressEvent(event)
+        self.update()
+        event.accept()
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        option = self.sliderOption()
+        groove = self.style().subControlRect(
+            QtWidgets.QStyle.ComplexControl.CC_Slider, option,
+            QtWidgets.QStyle.SubControl.SC_SliderGroove, self,
+        )
+        trackWidth = max(3, self.style().pixelMetric(QtWidgets.QStyle.PixelMetric.PM_SliderThickness) // 5)
+        painter.setPen(QtGui.QPen(self.palette().mid().color(), trackWidth))
+        painter.drawLine(
+            QtCore.QPoint(self.handleRect(-self.limit).center().x(), groove.center().y()),
+            QtCore.QPoint(self.handleRect(self.limit).center().x(), groove.center().y()),
+        )
+        painter.setPen(QtGui.QPen(self.palette().highlight().color(), trackWidth))
+        painter.drawLine(
+            QtCore.QPoint(self.handleRect(self.lowerValue).center().x(), groove.center().y()),
+            QtCore.QPoint(self.handleRect(self.upperValue).center().x(), groove.center().y()),
+        )
+        for name in ("upper" if self.activeHandle == "lower" else "lower", self.activeHandle):
+            value = self.lowerValue if name == "lower" else self.upperValue
+            handleOption = self.sliderOption(value)
+            handleOption.subControls = QtWidgets.QStyle.SubControl.SC_SliderHandle
+            if name != self.activeHandle:
+                handleOption.state &= ~QtWidgets.QStyle.StateFlag.State_HasFocus
+            painter.save()
+            # Some native styles paint the single-slider fill even when only
+            # its handle is requested. Keep it inside the handle's bounds.
+            painter.setClipRect(self.handleRect(value).adjusted(-1, -1, 1, 1))
+            self.style().drawComplexControl(
+                QtWidgets.QStyle.ComplexControl.CC_Slider, handleOption, painter, self
+            )
+            painter.restore()
+
+
 class SliderTickLabels(QtWidgets.QWidget):
     """Place labels at Qt's actual slider handle positions, including DPI scaling."""
 
@@ -543,18 +692,40 @@ class Ui_MainWindow:
         self.viewControlsLayout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetNoConstraint)
         self.groupBox_6 = QtWidgets.QGroupBox(self.verticalFrame_3)
         self.verticalLayout_9 = makeLayout(QtWidgets.QGridLayout, self.groupBox_6)
-        self.animationSpeedLabel = QtWidgets.QLabel(self.groupBox_6)
-        self.verticalLayout_9.addWidget(self.animationSpeedLabel, 0, 0)
         self.animationSpeedSlider = ClickableSlider(Qt.Orientation.Horizontal, self.groupBox_6)
         self.animationSpeedSlider.setMaximum(4)
         self.animationSpeedSlider.setValue(3)
         self.animationSpeedSlider.setTickPosition(QtWidgets.QSlider.TickPosition.TicksBelow)
-        self.verticalLayout_9.addWidget(self.animationSpeedSlider, 0, 1)
-        self.verticalLayout_9.setColumnStretch(1, 1)
+        self.verticalLayout_9.addWidget(self.animationSpeedSlider, 0, 0)
+        self.verticalLayout_9.setColumnStretch(0, 1)
         self.speedTickLabels = SliderTickLabels(self.animationSpeedSlider,
                                                ("0.1x", "0.25x", "0.5x", "1x", "2x"), self.groupBox_6)
-        self.verticalLayout_9.addWidget(self.speedTickLabels, 1, 1)
-        self.gridLayout.addWidget(self.groupBox_6, 2, 0)
+        self.verticalLayout_9.addWidget(self.speedTickLabels, 1, 0)
+        self.playbackOptionsLayout = makeLayout(QtWidgets.QHBoxLayout)
+        self.playbackOptionsLayout.addWidget(self.groupBox_6, 1)
+        self.onionPreviewGroupBox = QtWidgets.QGroupBox("Onion", self.verticalFrame_3)
+        self.onionPreviewLayout = makeLayout(QtWidgets.QVBoxLayout, self.onionPreviewGroupBox)
+        self.onionPreviewCheckBox = QtWidgets.QCheckBox("Show", self.onionPreviewGroupBox)
+        self.onionHeaderLayout = makeLayout(QtWidgets.QHBoxLayout)
+        self.onionHeaderLayout.addWidget(self.onionPreviewCheckBox)
+        self.onionHeaderLayout.addStretch()
+        self.onionRangeLabel = QtWidgets.QLabel("-1 to +1", self.onionPreviewGroupBox)
+        self.onionHeaderLayout.addWidget(self.onionRangeLabel)
+        self.onionPreviewLayout.addLayout(self.onionHeaderLayout)
+        self.onionRangeSlider = OnionRangeSlider(self.onionPreviewGroupBox)
+        self.onionPreviewLayout.addWidget(self.onionRangeSlider)
+        self.onionOpacityLayout = makeLayout(QtWidgets.QHBoxLayout)
+        opacityTitle = QtWidgets.QLabel("Opacity", self.onionPreviewGroupBox)
+        opacityLabel, opacitySlider = makeOpacityControls("onion", self.onionPreviewGroupBox)
+        opacitySlider.setValue(72)
+        opacityLabel.setText("28%")
+        opacityTitle.setBuddy(opacitySlider)
+        self.onionOpacityLayout.addWidget(opacityTitle)
+        self.onionOpacityLayout.addWidget(opacitySlider, 1)
+        self.onionOpacityLayout.addWidget(opacityLabel)
+        self.onionPreviewLayout.addLayout(self.onionOpacityLayout)
+        self.playbackOptionsLayout.addWidget(self.onionPreviewGroupBox, 1)
+        self.gridLayout.addLayout(self.playbackOptionsLayout, 2, 0)
         self.previewGroupBox = QtWidgets.QGroupBox(self.viewControlsPanel)
         self.previewLayout = makeLayout(QtWidgets.QHBoxLayout, self.previewGroupBox)
         self.previewLayout.setContentsMargins(9, 0, 9, 6)
@@ -672,10 +843,13 @@ class Ui_MainWindow:
         self.gridLayout_3.setColumnStretch(1, 1)
 
         self.groupBox_3 = QtWidgets.QGroupBox(self.editorPanel)
-        self.groupBox_3.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
+        self.groupBox_3.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
         self.sequenceLayout = makeLayout(QtWidgets.QVBoxLayout, self.groupBox_3)
         self.sequenceBody = makeLayout(QtWidgets.QHBoxLayout)
         self.animationFrameList = TextWidthListWidget(self.groupBox_3, characters=10)
+        self.animationFrameList.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding
+        )
         self.animationFrameList.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
@@ -702,6 +876,7 @@ class Ui_MainWindow:
         self.viewControlsLayout.addWidget(self.inspectorPanel, 0, 0)
         self.viewControlsLayout.addWidget(self.groupBox_3, 0, 1)
         self.viewControlsLayout.addWidget(self.previewGroupBox, 1, 0, 1, 2)
+        self.viewControlsLayout.setColumnStretch(1, 1)
         self.viewControlsLayout.setRowStretch(0, 1)
         self.previewGroupBox.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
                                           QtWidgets.QSizePolicy.Policy.Maximum)
@@ -839,11 +1014,9 @@ class Ui_MainWindow:
                 self.sequenceButtons.addWidget(button, index // 3 if stacked else index,
                                                 index % 3 if stacked else 0)
             self.sequenceButtons.setRowStretch(2 if stacked else 5, 1)
-            self.groupBox_3.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred if stacked
-                                          else QtWidgets.QSizePolicy.Policy.Fixed,
+            self.groupBox_3.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                           QtWidgets.QSizePolicy.Policy.Expanding)
-            self.animationFrameList.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding if stacked
-                                                   else QtWidgets.QSizePolicy.Policy.Fixed,
+            self.animationFrameList.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                                    QtWidgets.QSizePolicy.Policy.Expanding)
             self.groupBox_3.show()
         finally:
@@ -862,7 +1035,6 @@ class Ui_MainWindow:
         self.inspectorPanel.setTitle(_translate("MainWindow", "Animation Frame"))
         self.previewGroupBox.setTitle(_translate("MainWindow", "Preview"))
         self.groupBox_6.setTitle(_translate("MainWindow", "Animation Speed"))
-        self.animationSpeedLabel.setText(_translate("MainWindow", "1x"))
         self.directionGroupBox.setTitle(_translate("MainWindow", "Direction"))
         for button, name in (
                 (self.buttonUpLeft, "Up-left"), (self.buttonUp, "Up"), (self.buttonUpRight, "Up-right"),
@@ -896,7 +1068,7 @@ class Ui_MainWindow:
         self.actionExit.setText(_translate("MainWindow", "Exit"))
         self.actionNone.setText(_translate("MainWindow", "None"))
         self.actionSave_As.setText(_translate("MainWindow", "Save As"))
-        self.actionAdd_Action_Copy.setText(_translate("MainWindow", "Add Action Alias…"))
+        self.actionAdd_Action_Copy.setText(_translate("MainWindow", "Add Action Alias..."))
         self.actionTrim_Copies.setText(_translate("MainWindow", "Trim Copies"))
         self.actionCollapse_Singles.setText(_translate("MainWindow", "Collapse Singles"))
         self.actionExportAll_Animations.setText(_translate("MainWindow", "Multi-Animation Sheets"))

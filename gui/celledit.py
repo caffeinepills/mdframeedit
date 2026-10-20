@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from PIL import Image
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from utils import FormatError
@@ -16,6 +17,8 @@ class CellResizePreview(QtWidgets.QWidget):
         self.image = image
         self.cellSize = image.size()
         self.referenceSize = image.size()
+        self.centerArtwork = False
+        self.artworkBounds = None
         self.setMinimumSize(160, 160)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding
@@ -38,6 +41,10 @@ class CellResizePreview(QtWidgets.QWidget):
         painter.setClipRect(cell)
         dx = width // 2 - self.image.width() // 2
         dy = height // 2 - self.image.height() // 2
+        if self.centerArtwork and self.artworkBounds is not None:
+            left, top, right, bottom = self.artworkBounds
+            dx += self.image.width() // 2 - left - (right - left) // 2
+            dy += self.image.height() // 2 - top - (bottom - top) // 2
         painter.drawImage(QtCore.QRectF(
             cell.left() + dx * scale, cell.top() + dy * scale,
             self.image.width() * scale, self.image.height() * scale,
@@ -51,11 +58,11 @@ class ResizeFramesDialog(QtWidgets.QDialog):
     def __init__(self, editor: AnimationEditor) -> None:
         super().__init__(editor.window)
         self.editor = editor
-        self.setWindowTitle("Resize Frame Cells")
+        self.setWindowTitle("Edit Frame Cells")
         layout = QtWidgets.QVBoxLayout(self)
         description = QtWidgets.QLabel(
-            "Resize every cell in the sprite sheet. Artwork stays at its original "
-            "pixel size and keeps its position during playback.", self,
+            "Resize, trim, or center artwork in every sheet cell. Artwork stays "
+            "at its original pixel size and keeps its position during playback.", self,
         )
         description.setWordWrap(True)
         layout.addWidget(description)
@@ -75,10 +82,12 @@ class ResizeFramesDialog(QtWidgets.QDialog):
         form.addRow("New width:", self.widthSpinBox)
         form.addRow("New height:", self.heightSpinBox)
         layout.addLayout(form)
+        self.centerArtworkCheckBox = QtWidgets.QCheckBox("Center artwork in each cell", self)
+        layout.addWidget(self.centerArtworkCheckBox)
         trimLayout = QtWidgets.QHBoxLayout()
         self.trimButton = QtWidgets.QPushButton("Trim Extra Space", self)
         self.trimButton.setToolTip(
-            "Fit all frames and action points while keeping the current frame origin"
+            "Fit all frames and action points using the selected centering option"
         )
         self.trimButton.clicked.connect(self.trimExtraSpace)
         trimLayout.addWidget(self.trimButton)
@@ -89,6 +98,7 @@ class ResizeFramesDialog(QtWidgets.QDialog):
             index = editor.current_anim_frame.frame_index if editor.current_anim_frame else 0
         image = editor.image_grid[index]
         pixels = image.get_image_data().get_data("RGBA", -image.width * 4)
+        artworkBounds = Image.frombytes("RGBA", (image.width, image.height), pixels).getchannel("A").getbbox()
         previewImage = QtGui.QImage(
             pixels, image.width, image.height, QtGui.QImage.Format.Format_RGBA8888
         ).copy()
@@ -97,6 +107,7 @@ class ResizeFramesDialog(QtWidgets.QDialog):
             group = QtWidgets.QGroupBox(f"{title} - Frame {index}", self)
             groupLayout = QtWidgets.QVBoxLayout(group)
             preview = CellResizePreview(previewImage, group)
+            preview.artworkBounds = artworkBounds
             groupLayout.addWidget(preview)
             previews.addWidget(group)
             if title == "After":
@@ -118,17 +129,21 @@ class ResizeFramesDialog(QtWidgets.QDialog):
         layout.addWidget(buttons)
         self.widthSpinBox.valueChanged.connect(self.updatePreview)
         self.heightSpinBox.valueChanged.connect(self.updatePreview)
+        self.centerArtworkCheckBox.toggled.connect(self.updatePreview)
         self.updatePreview()
         self.resize(self.fontMetrics().horizontalAdvance("0") * 65, 440)
 
     @QtCore.Slot()
     def trimExtraSpace(self) -> None:
-        width, height = self.editor._sprite_document().trimmed_frame_size()
+        width, height = self.editor._sprite_document().trimmed_frame_size(
+            center_artwork=self.centerArtworkCheckBox.isChecked()
+        )
         self.widthSpinBox.setValue(width)
         self.heightSpinBox.setValue(height)
 
     @QtCore.Slot()
     def updatePreview(self) -> None:
+        self.afterPreview.centerArtwork = self.centerArtworkCheckBox.isChecked()
         self.afterPreview.cellSize = QtCore.QSize(
             self.widthSpinBox.value(), self.heightSpinBox.value()
         )
@@ -139,7 +154,7 @@ class ResizeFramesDialog(QtWidgets.QDialog):
         self.afterPreview.update()
         self.errorLabel.hide()
         self.applyButton.setEnabled(
-            self.afterPreview.cellSize != QtCore.QSize(
+            self.centerArtworkCheckBox.isChecked() or self.afterPreview.cellSize != QtCore.QSize(
                 self.editor.frame_width, self.editor.frame_height
             )
         )
@@ -148,7 +163,8 @@ class ResizeFramesDialog(QtWidgets.QDialog):
     def applyResize(self) -> None:
         try:
             self.editor.resizeFrameCells(
-                self.widthSpinBox.value(), self.heightSpinBox.value()
+                self.widthSpinBox.value(), self.heightSpinBox.value(),
+                centerArtwork=self.centerArtworkCheckBox.isChecked(),
             )
         except (FormatError, ValueError, MemoryError) as error:
             self.errorLabel.setText(str(error) or "Not enough memory for that sheet size.")

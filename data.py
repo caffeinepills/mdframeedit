@@ -361,3 +361,26 @@ class EditState:
     direction: int
     sheet_frame: int | None
     signature: tuple[object, ...]
+    frame_selection: tuple[int, ...] = ()
+
+
+@dataclass(slots=True)
+class BatchFrameEdit:
+    duration: int | None = None
+    sprite_offset: Offset | None = None
+    shadow_offset: Offset | None = None
+    shift_sprite: bool = True
+    shift_shadow: bool = True
+
+
+@dataclass(slots=True)
+class PaletteColor:
+    rgba: tuple[int, int, int, int]
+    pixels: int
+
+
+@dataclass(slots=True)
+class ArtworkInfo:
+    width: int
+    height: int
+    palette: list[PaletteColor]

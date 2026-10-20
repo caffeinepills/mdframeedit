@@ -660,6 +660,9 @@ class Ui_MainWindow:
         self.sequenceLayout = makeLayout(QtWidgets.QVBoxLayout, self.groupBox_3)
         self.sequenceBody = makeLayout(QtWidgets.QHBoxLayout)
         self.animationFrameList = TextWidthListWidget(self.groupBox_3, characters=10)
+        self.animationFrameList.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self.sequenceBody.addWidget(self.animationFrameList, 1)
         self.sequenceButtons = makeLayout(QtWidgets.QGridLayout)
         self.sequenceButtonWidgets = []
@@ -708,8 +711,6 @@ class Ui_MainWindow:
         self.menuRecent.setObjectName("menuRecent")
         self.menuExport = QtWidgets.QMenu(self.menuFile)
         self.menuExport.setObjectName("menuExport")
-        self.menuBatch = QtWidgets.QMenu(self.menubar)
-        self.menuBatch.setObjectName("menuBatch")
         MainWindow.setMenuBar(self.menubar)
         self.statusBar = QtWidgets.QStatusBar(MainWindow)
         self.statusBar.setObjectName("statusBar")
@@ -745,6 +746,7 @@ class Ui_MainWindow:
         self.menuFile.addAction(self.menuRecent.menuAction())
         self.menuFile.addSeparator()
         self.menuFile.addAction(self.menuExport.menuAction())
+        self.menuFile.addAction(self.actionAdd_Action_Copy)
         self.menuFile.addSeparator()
         self.menuFile.addAction(self.actionSave)
         self.menuFile.addAction(self.actionSave_As)
@@ -753,9 +755,7 @@ class Ui_MainWindow:
         self.menuFile.addSeparator()
         self.menuFile.addAction(self.actionExit)
         self.menuFile.addSeparator()
-        self.menuBatch.addAction(self.actionAdd_Action_Copy)
         self.menubar.addAction(self.menuFile.menuAction())
-        self.menubar.addAction(self.menuBatch.menuAction())
 
         self.retranslateUi(MainWindow)
         for name, obj in vars(self).items():
@@ -873,7 +873,6 @@ class Ui_MainWindow:
         self.menuFile.setTitle(_translate("MainWindow", "File"))
         self.menuRecent.setTitle(_translate("MainWindow", "Recent"))
         self.menuExport.setTitle(_translate("MainWindow", "Export"))
-        self.menuBatch.setTitle(_translate("MainWindow", "Batch"))
         self.actionLoad.setText(_translate("MainWindow", "Open"))
         self.actionLoad.setShortcut(_translate("MainWindow", "Ctrl+O"))
         self.actionSave.setText(_translate("MainWindow", "Save"))
@@ -881,7 +880,7 @@ class Ui_MainWindow:
         self.actionExit.setText(_translate("MainWindow", "Exit"))
         self.actionNone.setText(_translate("MainWindow", "None"))
         self.actionSave_As.setText(_translate("MainWindow", "Save As"))
-        self.actionAdd_Action_Copy.setText(_translate("MainWindow", "Add Action Copy"))
+        self.actionAdd_Action_Copy.setText(_translate("MainWindow", "Add Action Alias…"))
         self.actionTrim_Copies.setText(_translate("MainWindow", "Trim Copies"))
         self.actionCollapse_Singles.setText(_translate("MainWindow", "Collapse Singles"))
         self.actionExportAll_Animations.setText(_translate("MainWindow", "Multi-Animation Sheets"))

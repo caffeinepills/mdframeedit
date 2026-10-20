@@ -14,7 +14,7 @@ import traceback
 import xml.etree.ElementTree as ElementTree
 from functools import partial, wraps
 from hashlib import sha256
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import pyglet
 from PIL import Image
@@ -47,12 +47,15 @@ from data import (
     AnimationSequence,
     AnimFrame,
     AnimGroup,
+    BatchFrameEdit,
     Offset,
     SheetFormat, EditState,
 )
 from formats import detect_format, validate_export
-from gui.batchadd import Ui_BatchCreateAction
+from gui.batchadd import ActionAliasDialog
+from gui.batchedit import BatchEditDialog
 from gui.editor import Ui_MainWindow
+from gui.info import SpriteInfoDialog
 from gui.textures import TopLeftGrid
 from utils import (
     Camera,
@@ -60,7 +63,6 @@ from utils import (
     create_plus_image,
     shadow_image,
     template_image,
-    write_xml,
 )
 
 if TYPE_CHECKING:
@@ -94,23 +96,28 @@ class SpriteEditCommand(QtGui.QUndoCommand):
             self.editor.restoreEditState(self.after)
 
 
-def undoable(text: str) -> Callable[[Callable[..., None]], Callable[..., None]]:
+EditResult = TypeVar("EditResult")
+
+
+def undoable(text: str) -> Callable[
+    [Callable[..., EditResult]], Callable[..., EditResult]
+]:
     """Record one complete editor operation, including nested edit handlers."""
-    def decorate(method: Callable[..., None]) -> Callable[..., None]:
+    def decorate(method: Callable[..., EditResult]) -> Callable[..., EditResult]:
         @wraps(method)
-        def record(editor: AnimationEditor, *args: object, **kwargs: object) -> None:
+        def record(editor: AnimationEditor, *args: object, **kwargs: object) -> EditResult:
             if editor.loaded_tree is None or editor.editDepth or editor.restoringEdit:
-                method(editor, *args, **kwargs)
-                return
+                return method(editor, *args, **kwargs)
             before = editor.captureEditState()
             editor.editDepth += 1
             try:
-                method(editor, *args, **kwargs)
+                result = method(editor, *args, **kwargs)
             finally:
                 editor.editDepth -= 1
             after = editor.captureEditState()
             if before.signature != after.signature:
                 editor.undoStack.push(SpriteEditCommand(editor, text, before, after))
+            return result
         return record
     return decorate
 
@@ -186,6 +193,7 @@ class AnimGroupItem(QListWidgetItem):
             self.editor.ui.statusBar.showMessage(
                 f"Active action: {self.anim_group.name}."
             )
+        self.editor.updateBatchEditDialog()
 
 
 class AnimFrameItem(QListWidgetItem):
@@ -222,7 +230,8 @@ class AnimFrameItem(QListWidgetItem):
                 return
 
             self.editor.current_anim_frame = self.anim_frame
-            self.editor.ui.frameSlider.setValue(self.anim_frame.idx)
+            with QtCore.QSignalBlocker(self.editor.ui.frameSlider):
+                self.editor.ui.frameSlider.setValue(self.anim_frame.idx)
             self.editor.set_animation()
 
 
@@ -679,144 +688,6 @@ class PygletWidget(QOpenGLWidget):
         self._view_matrix = matrix
 
 
-class BatchAddImplementation:
-    def __init__(
-        self,
-        window: QtWidgets.QWidget,
-        editor: AnimationEditor,
-        ui: Ui_BatchCreateAction,
-    ) -> None:
-        self.window = window
-        self.ui = ui
-        self.editor = editor
-
-        self.ui.openDirectory.clicked.connect(lambda: self.open_directory())
-
-        self.loaded_frame_data()
-
-        self.ui.finalizeButtonBox.clicked.connect(self.finalize_click)
-
-    def apply(self) -> None:
-
-        if self.ui.copyComboBox.currentText() == self.ui.actionComboBox.currentText():
-            self.error_dialog = QtWidgets.QMessageBox()
-            self.error_dialog.setWindowTitle("Warning")
-            self.error_dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
-            self.error_dialog.setText("Both boxes cannot be the same name.")
-            self.error_dialog.exec()
-
-        else:
-            if not self.ui.directoryLineEdit.text():
-                return
-
-            use_action: AnimGroup = self.ui.actionComboBox.currentData()
-            copy_action: AnimGroup = self.ui.copyComboBox.currentData()
-
-            overwrite = self.ui.overwriteCheckbox.isChecked()
-            fulldata = self.ui.fullDataCheckbox.isChecked()
-
-            _use_idx = self.ui.indexSpinBox.value()
-            group_idx = _use_idx if _use_idx >= 0 else use_action.idx
-            collapse = self.editor.ui.actionCollapse_Singles.isChecked()
-
-            ct = 0
-            for dirpath, dirnames, filenames in os.walk(
-                self.ui.directoryLineEdit.text()
-            ):
-                for filename in filenames:
-                    if filename == "FrameData.xml":
-                        file_name = os.path.join(dirpath, filename)
-                        data = ElementTree.parse(file_name)
-
-                        root = data.getroot()
-
-                        anims_el = root.find("Anims")
-
-                        exists = False
-                        write = False
-                        for action_anim in anims_el:
-                            for anim_el in action_anim:
-                                if anim_el.tag == "Name":
-                                    # Found one...
-                                    if anim_el.text.lower() == use_action.name.lower():
-                                        exists = True
-
-                                        if overwrite:
-                                            # Clear existing anim.
-                                            action_anim.clear()
-                                            if self.editor.create_base_anim_group_xml(
-                                                action_anim,
-                                                use_action.name,
-                                                group_idx,
-                                                copy_action,
-                                                trim=not fulldata,
-                                                copy_name=copy_action.name,
-                                            ):
-                                                self.editor.create_single_sheet_frame_data(
-                                                    action_anim, copy_action, collapse
-                                                )
-
-                                            write = True
-                                        else:
-                                            break
-
-                        if not exists:
-                            anim_el = ElementTree.SubElement(anims_el, "Anim")
-                            if self.editor.create_base_anim_group_xml(
-                                anim_el,
-                                use_action.name,
-                                group_idx,
-                                copy_action,
-                                trim=not fulldata,
-                                copy_name=copy_action.name,
-                            ):
-                                self.editor.create_single_sheet_frame_data(
-                                    anim_el, copy_action, collapse
-                                )
-                            write = True
-
-                        if write:
-                            ElementTree.indent(root)
-
-                            tree = ElementTree.ElementTree(root)
-                            write_xml(tree, file_name)
-
-                            ct += 1
-
-            error_dialog = QtWidgets.QMessageBox()
-            error_dialog.setWindowTitle("Complete")
-            error_dialog.setIcon(QtWidgets.QMessageBox.Icon.Information)
-            error_dialog.setText(f"Operation completed with {ct} changes.")
-            error_dialog.exec()
-
-    def finalize_click(self, button: QtWidgets.QAbstractButton) -> None:
-        role = self.ui.finalizeButtonBox.buttonRole(button)
-        if role == QtWidgets.QDialogButtonBox.ButtonRole.ApplyRole:
-            self.apply()
-        elif role == QtWidgets.QDialogButtonBox.ButtonRole.RejectRole:
-            self.window.hide()
-
-    def loaded_frame_data(self) -> None:
-        self.ui.copyComboBox.clear()
-        self.ui.actionComboBox.clear()
-
-        self.fill_action_list()
-        self.fill_copy_list()
-
-    def fill_action_list(self) -> None:
-        for a in self.editor.groups:
-            self.ui.actionComboBox.addItem(a.name, userData=a)
-
-    def fill_copy_list(self) -> None:
-        for a in self.editor.groups:
-            self.ui.copyComboBox.addItem(a.name, userData=a)
-
-    def open_directory(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self.window, "Select Directory")
-
-        self.ui.directoryLineEdit.setText(directory)
-
-
 REDUCE_RUSH_FRAMES = False
 
 
@@ -845,12 +716,12 @@ class AnimationEditor(AnimationSerialization):
         self.shadow_size_present = True
         self.loaded_shadow_size = 0
         self.loaded_tree: ElementTree.ElementTree | None = None
-        self.batch_add_implem: BatchAddImplementation | None = None
         self.undoStack = QtGui.QUndoStack(window)
         self.undoStack.setUndoLimit(100)
         self.editDepth = 0
         self.restoringEdit = False
         self.savedEditSignature: tuple[object, ...] | None = None
+        self.batchEditDialog: BatchEditDialog | None = None
         self.editMenu = QtWidgets.QMenu("Edit", window)
         self.undoAction = self.undoStack.createUndoAction(window, "Undo")
         self.redoAction = self.undoStack.createRedoAction(window, "Redo")
@@ -866,10 +737,20 @@ class AnimationEditor(AnimationSerialization):
         self.pasteAnimationSettingsAction.setEnabled(False)
         self.animationSettingsClipboard: AnimGroup | None = None
         self.editMenu.aboutToShow.connect(self.updateAnimationSettingsActions)
+        self.editMenu.addSeparator()
+        self.batchEditAction = self.editMenu.addAction(
+            "Batch Edit Frames...", self.openBatchEdit
+        )
+        self.editMenu.aboutToShow.connect(
+            lambda: self.batchEditAction.setEnabled(
+                self.current_anim_group is not None
+                and any(sequence.frames for sequence in self.current_anim_group.directions)
+            )
+        )
         if document_host is None:
             self.undoAction.setShortcuts(QtGui.QKeySequence.StandardKey.Undo)
             self.redoAction.setShortcuts(QtGui.QKeySequence.StandardKey.Redo)
-            window.menuBar().insertMenu(ui.menuBatch.menuAction(), self.editMenu)
+            window.menuBar().addMenu(self.editMenu)
 
         self.settings = QSettings("MDFrameEditor", "Frame Editor")
         self.recent_files: list[str] = self.settings.value("recent", [], list)
@@ -952,7 +833,7 @@ class AnimationEditor(AnimationSerialization):
 
         self.current_direction = 0
         self.animating = False
-        self.newWindow: QtWidgets.QWidget | None = None
+        self.newWindow: ActionAliasDialog | None = None
 
         self.single_loaded: bool | None = None
 
@@ -1060,7 +941,7 @@ class AnimationEditor(AnimationSerialization):
 
         self.ui.defaultFrameButton.clicked.connect(lambda: self.default_frame_click())
 
-        self.ui.menuBatch.triggered.connect(lambda: self.open_batch_add())
+        self.ui.actionAdd_Action_Copy.triggered.connect(lambda: self.open_batch_add())
 
         self.ui.returnPointButton.clicked.connect(lambda: self.set_return_point())
         self.ui.hitPointButton.clicked.connect(lambda: self.set_hit_point())
@@ -1099,6 +980,10 @@ class AnimationEditor(AnimationSerialization):
             self.ui.actionListWidget.currentRow(),
             self.ui.animationFrameList.currentRow(), self.current_direction,
             self.selected_sheet_frame, SpriteEditorWindow._document_state(self),
+            tuple(sorted(
+                self.ui.animationFrameList.row(item)
+                for item in self.ui.animationFrameList.selectedItems()
+            )),
         )
 
     def restoreEditState(self, state: EditState) -> None:
@@ -1171,6 +1056,11 @@ class AnimationEditor(AnimationSerialization):
                     self.ui.frameSlider.setValue(max(row, 0))
                     if frames:
                         self.set_anim_frame_values(frames[row])
+                self.ui.animationFrameList.clearSelection()
+                for row in state.frame_selection:
+                    item = self.ui.animationFrameList.item(row)
+                    if item is not None:
+                        item.setSelected(True)
             self.selectSheetFrame(state.sheet_frame)
             if self.sprite is not None:
                 self.sprite.visible = spriteVisible
@@ -1500,13 +1390,12 @@ class AnimationEditor(AnimationSerialization):
                 frame_item.update_text()
 
     def open_batch_add(self) -> None:
-        if not self.newWindow:
-            self.newWindow = QtWidgets.QWidget()
-            ba = Ui_BatchCreateAction()
-            ba.setupUi(self.newWindow)
-            self.batch_add_implem = BatchAddImplementation(self.newWindow, self, ba)
-            self.newWindow.setWindowTitle("Batch Add Action")
+        if self.newWindow is None:
+            source = str(pathlib.Path(self.file_name).parent) if self.file_name else ""
+            self.newWindow = ActionAliasDialog(source)
         self.newWindow.show()
+        self.newWindow.raise_()
+        self.newWindow.activateWindow()
 
     def save_trim(self) -> None:
         self.settings.setValue("trim", self.ui.actionTrim_Copies.isChecked())
@@ -1677,6 +1566,120 @@ class AnimationEditor(AnimationSerialization):
             self.current_anim_group is not None
             and owner.animationSettingsClipboard is not None
         )
+
+    def batchEditFrames(self, scope: str) -> list[AnimFrame]:
+        """Collect targets once, including frames shared by several directions."""
+        if self.current_anim_group is None:
+            return []
+        if scope == "selected":
+            eligible = {
+                id(frame) for frame in self.current_anim_group.directions[
+                    self.current_direction
+                ].frames
+            }
+            frames = [
+                item.anim_frame for item in self.ui.animationFrameList.selectedItems()
+                if id(item.anim_frame) in eligible
+            ]
+        elif scope == "direction" and self.current_sequence is not None:
+            frames = self.current_sequence.frames
+        elif scope == "action":
+            frames = [
+                frame for sequence in self.current_anim_group.directions
+                for frame in sequence.frames
+            ]
+        else:
+            return []
+        return list({id(frame): frame for frame in frames}.values())
+
+    def openBatchEdit(self) -> None:
+        """Keep one non-modal batch tool open while selecting animation frames."""
+        if not self.batchEditFrames("action"):
+            return
+        owner = self.document_host or self
+        if owner.batchEditDialog is None:
+            owner.batchEditDialog = BatchEditDialog(self)
+        dialog = owner.batchEditDialog
+        dialog.setEditor(self)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def updateBatchEditDialog(self) -> None:
+        owner = self.document_host or self
+        dialog = owner.batchEditDialog
+        if dialog is not None and dialog.editor is self:
+            dialog.updateApplyButton()
+
+    @undoable("Batch Edit Frames")
+    def applyBatchEdit(self, scope: str, edit: BatchFrameEdit) -> bool:
+        """Validate the full edit before applying timing and offset changes."""
+        frames = self.batchEditFrames(scope)
+        if not frames:
+            self.ui.statusBar.showMessage("Select animation frames to edit.", 5000)
+            return False
+        if (
+            edit.duration is None
+            and edit.sprite_offset is None
+            and edit.shadow_offset is None
+        ):
+            self.ui.statusBar.showMessage("Choose a property to change.", 5000)
+            return False
+        if edit.duration is not None and not 1 <= edit.duration <= 32767:
+            self.ui.statusBar.showMessage("Duration must be between 1 and 32767 ticks.", 5000)
+            return False
+        changes: list[tuple[AnimFrame, int, Offset, Offset]] = []
+        for frame in frames:
+            sprite = frame.sprite_offset
+            shadow = frame.shadow_offset
+            if edit.sprite_offset is not None:
+                sprite = (
+                    sprite + edit.sprite_offset if edit.shift_sprite else edit.sprite_offset
+                )
+            if edit.shadow_offset is not None:
+                shadow = (
+                    shadow + edit.shadow_offset if edit.shift_shadow else edit.shadow_offset
+                )
+            for requested, offset in (
+                (edit.sprite_offset, sprite), (edit.shadow_offset, shadow)
+            ):
+                if requested is not None and not all(
+                    -32768 <= value <= 32767 for value in offset.data()
+                ):
+                    self.ui.statusBar.showMessage(
+                        "Offsets would exceed -32768 to 32767. No frames were changed.", 8000
+                    )
+                    return False
+            changes.append((
+                frame, edit.duration if edit.duration is not None else frame.duration,
+                copy.deepcopy(sprite), copy.deepcopy(shadow),
+            ))
+        changed = any(
+            frame.duration != duration
+            or frame.sprite_offset != sprite
+            or frame.shadow_offset != shadow
+            for frame, duration, sprite, shadow in changes
+        )
+        if not changed:
+            self.ui.statusBar.showMessage("Selected frames already match these settings.", 5000)
+            return True
+        for frame, duration, sprite, shadow in changes:
+            frame.duration, frame.sprite_offset, frame.shadow_offset = duration, sprite, shadow
+        self.clear_copy_group()
+        self.current_anim_group.modified = True
+        for item in self._get_action_list_items():
+            if item.anim_group is self.current_anim_group:
+                item.update_text()
+        item = self.ui.animationFrameList.currentItem()
+        selectedSheetFrame = self.selected_sheet_frame
+        if item is not None:
+            self.set_anim_frame_values(item.anim_frame)
+        self.selectSheetFrame(selectedSheetFrame)
+        if not self.animating:
+            self.set_animation()
+        noun = "frame" if len(frames) == 1 else "frames"
+        self.ui.statusBar.showMessage(f"Updated {len(frames)} animation {noun}.", 5000)
+        return True
 
     def copyAnimationSettings(self) -> None:
         """Keep a detached settings snapshot available across sprite tabs."""
@@ -2223,6 +2226,8 @@ class AnimationEditor(AnimationSerialization):
 
                 self.ui.animationFrameList.setCurrentRow(0)
 
+        self.updateBatchEditDialog()
+
     def clear_anim_frame(self) -> None:
         """Clears information boxes of the Frame Data."""
         self.current_anim_frame = None
@@ -2406,8 +2411,6 @@ class AnimationEditor(AnimationSerialization):
             self.ui.actionListWidget.addItem(AnimGroupItem(group, self))
         self.add_recent_list(file_name)
         self.trackArtwork()
-        if expected == SheetFormat.SINGLE and self.batch_add_implem:
-            self.batch_add_implem.loaded_frame_data()
         self.savedEditSignature = SpriteEditorWindow._document_state(self)
         self.ui.statusBar.showMessage(
             "Frame data and images loaded successfully.", 3000
@@ -2810,6 +2813,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         self._saved_states: dict[QtWidgets.QWidget, tuple[object, ...]] = {}
         self._active_editor: AnimationEditor | None = None
         self.animationSettingsClipboard: AnimGroup | None = None
+        self.batchEditDialog: BatchEditDialog | None = None
         self.documentTabs = QtWidgets.QTabWidget(self)
         self.documentTabs.setObjectName("documentTabs")
         self.documentTabs.setDocumentMode(True)
@@ -2859,6 +2863,24 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
             action.toggled.connect(partial(self.setPreference, name))
             menu.addAction(action)
             self.preferenceActions[name] = action
+        self.viewMenu.addSeparator()
+        self.infoAction = self.viewMenu.addAction("Info...", self.showSpriteInfo)
+        self.infoAction.setEnabled(False)
+        self.viewMenu.aboutToShow.connect(self.updateInfoAction)
+
+    def updateInfoAction(self) -> None:
+        editor = self.current_editor
+        self.infoAction.setEnabled(editor is not None and editor.sheet_image is not None)
+
+    def showSpriteInfo(self) -> None:
+        editor = self.current_editor
+        if editor is None or editor.sheet_image is None:
+            return
+        dialog = SpriteInfoDialog(editor)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
     def setPreference(self, name: str, checked: bool) -> None:
         self.settings.setValue(f"preferences/{name}", checked)
@@ -3026,6 +3048,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         self.documentTabs.setCurrentWidget(page)
         self._document_status(editor, editor.ui.statusBar.currentMessage())
         self.updateArtworkReloadAction()
+        self.updateInfoAction()
         return editor
 
     def _update_tab(self, page: QtWidgets.QWidget) -> None:
@@ -3072,6 +3095,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
 
     def _activate_document(self, index: int) -> None:
         self.updateArtworkReloadAction()
+        self.updateInfoAction()
         if self._active_editor is not None:
             self._active_editor.undoAction.setShortcuts([])
             self._active_editor.redoAction.setShortcuts([])
@@ -3081,11 +3105,13 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         self.menuBar().clear()
         editor = self.current_editor
         self._active_editor = editor
+        if self.batchEditDialog is not None:
+            self.batchEditDialog.setEditor(editor)
         if editor is not None:
             editor.undoAction.setShortcuts(QtGui.QKeySequence.StandardKey.Undo)
             editor.redoAction.setShortcuts(QtGui.QKeySequence.StandardKey.Redo)
             self._restorePanelLayout(editor)
-            for menu in (editor.ui.menuFile, editor.editMenu, editor.ui.menuBatch):
+            for menu in (editor.ui.menuFile, editor.editMenu):
                 self.menuBar().addAction(menu.menuAction())
             self.menuBar().addMenu(self.viewMenu)
             self.menuBar().addMenu(self.settingsMenu)
@@ -3161,6 +3187,8 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
 
     def _dispose_document(self, page: QtWidgets.QWidget) -> None:
         editor = self._editors.pop(page)
+        if self.batchEditDialog is not None and self.batchEditDialog.editor is editor:
+            self.batchEditDialog.setEditor(self.current_editor)
         editor.undoStack.clear()
         editor.undoStack.deleteLater()
         editor.editMenu.deleteLater()
@@ -3168,6 +3196,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         editor.redoAction.deleteLater()
         editor.copyAnimationSettingsAction.deleteLater()
         editor.pasteAnimationSettingsAction.deleteLater()
+        editor.batchEditAction.deleteLater()
         editor.setArtworkReloadEnabled(False)
         editor.artworkWatcher.deleteLater()
         editor.artworkReloadTimer.deleteLater()
@@ -3187,6 +3216,9 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
             event.ignore()
             return
         self._saveWindowLayout()
+        if self.batchEditDialog is not None:
+            self.batchEditDialog.setEditor(None)
+            self.batchEditDialog.close()
         self.menuBar().clear()
         self._active_editor = None
         for page in list(self._editors):

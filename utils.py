@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from PIL import Image, ImageChops, ImageDraw
 
-from data import AnimFrame, Offset
+from data import AnimFrame, ArtworkInfo, Offset, PaletteColor
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterable, Mapping
@@ -47,6 +47,17 @@ def write_xml(
 def template_image() -> Image.Image:
     with Image.open(BytesIO(base64.b64decode(_TEMPLATE_PNG))) as source:
         return source.convert("RGBA")
+
+
+def analyze_artwork(image: Image.Image) -> ArtworkInfo:
+    """Count exact RGBA entries, including transparent colors and alpha variants."""
+    rgba = image if image.mode == "RGBA" else image.convert("RGBA")
+    colors = [
+        PaletteColor(color, count)
+        for count, color in rgba.getcolors(rgba.width * rgba.height) or []
+    ]
+    colors.sort(key=lambda color: (-color.pixels, color.rgba))
+    return ArtworkInfo(rgba.width, rgba.height, colors)
 
 
 def shadow_image(size: int, black: bool = False) -> Image.Image:

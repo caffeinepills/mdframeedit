@@ -1,99 +1,172 @@
-from PySide6 import QtCore, QtWidgets
+"""Batch action alias dialog, independent of the active sprite's frame data."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from PySide6 import QtCore, QtGui, QtWidgets
+
+from action_alias import add_action_aliases
 
 
-class Ui_BatchCreateAction(object):
-    def setupUi(self, BatchCreateAction):
-        BatchCreateAction.setObjectName("BatchCreateAction")
-        BatchCreateAction.resize(400, 300)
+class AliasWorker(QtCore.QThread):
+    completed = QtCore.Signal(str, object)
+    failed = QtCore.Signal(str)
 
-        self.verticalLayout = QtWidgets.QVBoxLayout(BatchCreateAction)
-        self.verticalLayout.setObjectName("verticalLayout")
+    def __init__(self, parent, source, destination, action, fallbacks, index):
+        super().__init__(parent)
+        self.arguments = source, destination, action, fallbacks, index
 
-        self.label = QtWidgets.QLabel(BatchCreateAction)
-        self.label.setObjectName("label")
-        self.label.setWordWrap(True)
-        self.label.setMinimumHeight(110)
-        self.verticalLayout.addWidget(self.label)
+    def run(self):
+        try:
+            path, counts = add_action_aliases(*self.arguments)
+        except Exception as error:
+            self.failed.emit(str(error))
+        else:
+            self.completed.emit(str(path), counts)
 
-        self.directoryFrame = QtWidgets.QHBoxLayout()
-        self.directoryFrame.setObjectName("directoryFrame")
 
-        self.directoryLineEdit = QtWidgets.QLineEdit(BatchCreateAction)
-        self.directoryLineEdit.setObjectName("directoryLineEdit")
-        self.directoryFrame.addWidget(self.directoryLineEdit)
-        self.openDirectory = QtWidgets.QPushButton(BatchCreateAction)
-        self.openDirectory.setObjectName("openDirectory")
-        self.directoryFrame.addWidget(self.openDirectory)
-        self.verticalLayout.addLayout(self.directoryFrame)
-        self.comboFrame = QtWidgets.QHBoxLayout()
-        self.comboFrame.setObjectName("comboFrame")
-        self.leftComboLayout = QtWidgets.QVBoxLayout()
-        self.leftComboLayout.setObjectName("leftComboLayout")
-        self.label_2 = QtWidgets.QLabel(BatchCreateAction)
-        self.label_2.setObjectName("label_2")
-        self.leftComboLayout.addWidget(self.label_2)
-        self.actionComboBox = QtWidgets.QComboBox(BatchCreateAction)
-        self.actionComboBox.setObjectName("actionComboBox")
-        self.leftComboLayout.addWidget(self.actionComboBox)
-        self.comboFrame.addLayout(self.leftComboLayout)
-        self.rightComboLayout = QtWidgets.QVBoxLayout()
-        self.rightComboLayout.setObjectName("rightComboLayout")
-        self.label_3 = QtWidgets.QLabel(BatchCreateAction)
-        self.label_3.setObjectName("label_3")
-        self.rightComboLayout.addWidget(self.label_3)
-        self.copyComboBox = QtWidgets.QComboBox(BatchCreateAction)
-        self.copyComboBox.setObjectName("copyComboBox")
-        self.rightComboLayout.addWidget(self.copyComboBox)
-        self.comboFrame.addLayout(self.rightComboLayout)
-        self.verticalLayout.addLayout(self.comboFrame)
-        self.optionsFrame = QtWidgets.QHBoxLayout()
-        self.optionsFrame.setObjectName("optionsFrame")
-        self.indexLayout = QtWidgets.QVBoxLayout()
-        self.indexLayout.setObjectName("indexLayout")
-        self.label_4 = QtWidgets.QLabel(BatchCreateAction)
-        self.label_4.setObjectName("label_4")
-        self.indexLayout.addWidget(self.label_4)
-        self.indexSpinBox = QtWidgets.QSpinBox(BatchCreateAction)
-        self.indexSpinBox.setObjectName("indexSpinBox")
-        self.indexSpinBox.setMinimum(-1)
-        self.indexSpinBox.setMaximum(999)
+class ActionAliasDialog(QtWidgets.QDialog):
+    def __init__(self, source: str = ""):
+        super().__init__()
+        self.setWindowTitle("Add Action Alias")
+        self.resize(560, 480)
+        self.worker = None
+        self.log_path = None
+        layout = QtWidgets.QVBoxLayout(self)
+        description = QtWidgets.QLabel(
+            "Ensure an action exists in each sprite by adding a CopyOf alias. "
+            "Existing actions are always kept. The complete source folder is copied "
+            "to a new output folder; original files are never modified."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        self.controls = QtWidgets.QWidget(self)
+        form = QtWidgets.QFormLayout(self.controls)
+        self.sourceEdit = QtWidgets.QLineEdit(source)
+        self.outputEdit = QtWidgets.QLineEdit()
+        for label, edit, callback in (
+            ("Source folder:", self.sourceEdit, self.browse_source),
+            ("New output folder:", self.outputEdit, self.browse_output),
+        ):
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(edit)
+            button = QtWidgets.QPushButton("Browse…")
+            button.clicked.connect(callback)
+            row.addWidget(button)
+            form.addRow(label, row)
+        self.actionEdit = QtWidgets.QLineEdit()
+        self.actionEdit.setPlaceholderText("e.g. Fly")
+        form.addRow("Action name:", self.actionEdit)
+        self.fallbackEdit = QtWidgets.QPlainTextEdit()
+        self.fallbackEdit.setPlaceholderText("Hover\nWalk\nIdle")
+        self.fallbackEdit.setToolTip("Enter one action per line, in preference order. Names are not case sensitive.")
+        form.addRow("Fallbacks:\n(one per line,\nfirst choice at top)", self.fallbackEdit)
+        self.indexSpinBox = QtWidgets.QSpinBox()
+        self.indexSpinBox.setRange(-1, 2147483647)
         self.indexSpinBox.setValue(-1)
-        self.indexLayout.addWidget(self.indexSpinBox)
-        self.optionsFrame.addLayout(self.indexLayout)
-        self.overwriteCheckbox = QtWidgets.QCheckBox(BatchCreateAction)
-        self.overwriteCheckbox.setObjectName("overwriteCheckbox")
-        self.overwriteCheckbox.setChecked(True)
-        self.optionsFrame.addWidget(self.overwriteCheckbox)
-        self.fullDataCheckbox = QtWidgets.QCheckBox(BatchCreateAction)
-        self.fullDataCheckbox.setObjectName("fullDataCheckbox")
-        self.fullDataCheckbox.setChecked(False)
-        self.optionsFrame.addWidget(self.fullDataCheckbox)
-        self.verticalLayout.addLayout(self.optionsFrame)
-        self.finalizeButtonBox = QtWidgets.QDialogButtonBox(BatchCreateAction)
-        self.finalizeButtonBox.setObjectName("finalizeButtonBox")
-        self.finalizeButtonBox.setStandardButtons(
-            QtWidgets.QDialogButtonBox.StandardButton.Apply | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
-        self.verticalLayout.addWidget(self.finalizeButtonBox)
+        self.indexSpinBox.setSpecialValueText("Automatic per sprite")
+        self.indexSpinBox.setToolTip("Automatic uses the next unused index in each sprite. A specified index is used for all sprites. Check logs for conflicts.")
+        form.addRow("Action index:", self.indexSpinBox)
+        layout.addWidget(self.controls)
+        hint = QtWidgets.QLabel(
+            "Processes FrameData.xml and AnimData.xml in all subfolders. "
+            "The output folder must not exist and must be outside the source folder. "
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.statusLabel = QtWidgets.QLabel()
+        self.statusLabel.setWordWrap(True)
+        self.statusLabel.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.statusLabel)
+        self.buttonBox = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Apply
+            | QtWidgets.QDialogButtonBox.StandardButton.Close
+        )
+        self.applyButton = self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Apply)
+        self.applyButton.setText("Create Output")
+        self.applyButton.clicked.connect(self.apply)
+        self.buttonBox.rejected.connect(self.reject)
+        self.logButton = self.buttonBox.addButton("Open Log", QtWidgets.QDialogButtonBox.ButtonRole.ActionRole)
+        self.logButton.setEnabled(False)
+        self.logButton.clicked.connect(self.open_log)
+        layout.addWidget(self.buttonBox)
+        self.sourceEdit.editingFinished.connect(self.suggest_output)
+        self.suggest_output()
+        QtWidgets.QApplication.instance().aboutToQuit.connect(self.wait_for_worker)
 
-        self.retranslateUi(BatchCreateAction)
-        QtCore.QMetaObject.connectSlotsByName(BatchCreateAction)
+    def suggest_output(self):
+        if self.sourceEdit.text().strip() and not self.outputEdit.text():
+            source = Path(self.sourceEdit.text().strip())
+            if source.name:
+                self.outputEdit.setText(str(source.with_name(source.name + "-aliases")))
 
-    def retranslateUi(self, BatchCreateAction):
-        _translate = QtCore.QCoreApplication.translate
-        BatchCreateAction.setWindowTitle(_translate("BatchCreateAction", "Batch Add Action"))
-        self.label.setText(_translate("BatchCreateAction",
-                                      "Batch add animation action name to all FrameData.xml in destination folder and all subfolders.\n"
-                                      "Will be considered a copy action until manually overwritten. The copy action MUST exist in all FrameData you write to.\n"
-                                      "If an Index ID is not specified, the original index will be used. Avoid collisions with other ID\'s unless you intend to overwrite."))
-        self.label_2.setText(_translate("BatchCreateAction", "Action to Apply"))
-        self.label_3.setText(_translate("BatchCreateAction", "Fallback / Copy From"))
-        self.label_4.setText(_translate("BatchCreateAction", "Index ID"))
-        self.overwriteCheckbox.setText(_translate("BatchCreateAction", "Overwrite"))
-        self.openDirectory.setIcon(self.openDirectory.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon))
-        self.openDirectory.setText(_translate("BatchCreateAction", "Browse..."))
-        self.openDirectory.setToolTip(_translate("BatchCreateAction", "Choose the folder containing the sprite files to update."))
-        self.finalizeButtonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Apply).setToolTip(
-            _translate("BatchCreateAction", "Apply the selected action to sprite files in this folder and its subfolders."))
-        self.finalizeButtonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Cancel).setToolTip(
-            _translate("BatchCreateAction", "Close without applying another batch change."))
-        self.fullDataCheckbox.setText(_translate("BatchCreateAction", "Write Full Data"))
+    def browse_source(self):
+        selected = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose Source Folder", self.sourceEdit.text())
+        if selected:
+            self.sourceEdit.setText(selected)
+            self.outputEdit.clear()
+            self.suggest_output()
+
+    def browse_output(self):
+        # Select an existing parent, then name a new child folder.
+        parent = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose Output Parent Folder", str(Path(self.outputEdit.text()).parent))
+        if parent:
+            name, accepted = QtWidgets.QInputDialog.getText(self, "New Output Folder", "Folder name:", text="sprites-aliases")
+            if accepted and name.strip():
+                if Path(name).name != name or name in {".", ".."}:
+                    self.statusLabel.setText("Enter a folder name, without a path.")
+                else:
+                    self.outputEdit.setText(str(Path(parent) / name))
+
+    def apply(self):
+        if self.worker is not None:
+            return
+        if not self.sourceEdit.text().strip() or not self.outputEdit.text().strip():
+            self.statusLabel.setText("Choose a source folder and a new output folder.")
+            return
+        self.controls.setEnabled(False)
+        self.applyButton.setEnabled(False)
+        self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Close).setEnabled(False)
+        self.logButton.setEnabled(False)
+        self.statusLabel.setText("Copying sprite files and adding missing aliases…")
+        self.worker = AliasWorker(
+            self, self.sourceEdit.text().strip(), self.outputEdit.text().strip(),
+            self.actionEdit.text(), self.fallbackEdit.toPlainText().splitlines(),
+            None if self.indexSpinBox.value() == -1 else self.indexSpinBox.value(),
+        )
+        self.worker.completed.connect(self.completed)
+        self.worker.failed.connect(self.statusLabel.setText)
+        self.worker.finished.connect(self.worker_finished)
+        self.worker.start()
+
+    def completed(self, path, counts):
+        self.log_path = path
+        summary = ", ".join(f"{key.lower().replace('_', ' ')}: {value}" for key, value in sorted(counts.items()))
+        self.statusLabel.setText(f"Finished — {summary}.\nLog: {path}")
+        self.logButton.setEnabled(True)
+
+    def worker_finished(self):
+        self.worker.deleteLater()
+        self.worker = None
+        self.controls.setEnabled(True)
+        self.applyButton.setEnabled(True)
+        self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Close).setEnabled(True)
+
+    def open_log(self):
+        if self.log_path:
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(self.log_path))
+
+    def wait_for_worker(self):
+        if self.worker is not None:
+            self.worker.wait()
+
+    def reject(self):
+        if self.worker is None:
+            super().reject()
+
+    def closeEvent(self, event):
+        if self.worker is not None:
+            event.ignore()
+        else:
+            super().closeEvent(event)

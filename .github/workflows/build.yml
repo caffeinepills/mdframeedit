@@ -20,15 +20,19 @@ jobs:
           - os: windows-latest
             architecture: x64
             target: windows-x64
+            executable: dist/MD Frame Editor/MDFrameEditor.exe
           - os: macos-15-intel
             architecture: x64
             target: macos-x64
+            executable: dist/MDFrameEditor.app/Contents/MacOS/MDFrameEditor
           - os: macos-15
             architecture: arm64
             target: macos-arm64
+            executable: dist/MDFrameEditor.app/Contents/MacOS/MDFrameEditor
           - os: ubuntu-22.04
             architecture: x64
             target: linux-x64
+            executable: dist/MD Frame Editor/MDFrameEditor
 
     steps:
       - name: Check out source
@@ -56,17 +60,22 @@ jobs:
       - name: Install build dependencies
         run: python -m pip install ".[gui]" "pyinstaller>=6.14,<7"
 
-      - name: Smoke test editor and conversion
+      - name: Smoke test editor and CLI
         if: runner.os != 'Linux'
         # This file has no dependency on the rest of the local test suite.
-        run: python tests/test_smoke.py
+        run: python tests/runner/test_smoke.py
 
-      - name: Smoke test Linux editor and conversion
+      - name: Smoke test Linux editor and CLI
         if: runner.os == 'Linux'
-        run: xvfb-run -a python tests/test_smoke.py
+        run: xvfb-run -a python tests/runner/test_smoke.py
 
       - name: Build application bundle
         run: python -m PyInstaller --clean --noconfirm MDFrameEditor.spec
+
+      - name: Smoke test packaged CLI
+        env:
+          MDFRAMEEDIT_TEST_EXECUTABLE: ${{ matrix.executable }}
+        run: python tests/runner/test_smoke.py EditorSmokeTest.test_cli_converts_both_formats
 
       - name: Package Windows client
         if: runner.os == 'Windows'

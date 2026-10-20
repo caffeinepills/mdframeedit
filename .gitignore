@@ -1,2 +1,5 @@
+# Commit runner checks, keep feature and CLI regression tests local.
 /tests/*
-!/tests/test_smoke.py
+!/tests/README.md
+!/tests/runner/
+/tests/runner/__pycache__/

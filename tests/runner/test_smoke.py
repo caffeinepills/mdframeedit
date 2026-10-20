@@ -127,7 +127,8 @@ class EditorSmokeTest(unittest.TestCase):
                     self.assertTrue(action.isEnabled())
                     self.assertTrue(action.isChecked())
                     self.assertIn(
-                        str(single / "Anim.png"), editor.artworkWatcher.files()
+                        (single / "Anim.png").resolve(),
+                        [Path(path).resolve() for path in editor.artworkWatcher.files()],
                     )
                     self.assertTrue(
                         settings.value("preferences/autoReloadArtwork", False, bool)

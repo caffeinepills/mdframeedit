@@ -120,6 +120,26 @@ class AnimGroup:
     copy_name: str = field(compare=False, default='')  # If it is a copy of another group.
     modified: bool = field(compare=False, default=False)  # If it has been modified since loading.
 
+    def __post_init__(self):
+        if len(self.directions) == 1:
+            self.set_single_direction(self.directions[0])
+
+    @property
+    def is_single_direction(self):
+        """One shared sequence, rather than eight independently editable ones."""
+        return len(self.directions) == 8 and all(sequence is self.directions[0] for sequence in self.directions)
+
+    def set_single_direction(self, sequence):
+        # Keep compass indexing available without turning a shared sequence
+        # into eight separate copies that diverge as soon as one is edited.
+        self.directions = [sequence] * 8
+
+    def replace_sequence(self, direction, sequence):
+        if self.is_single_direction:
+            self.set_single_direction(sequence)
+        else:
+            self.directions[direction] = sequence
+
     def event_frames(self, sequence):
         """Effective event positions; omitted XML values remain -1 for saving."""
         last = len(sequence.frames) - 1

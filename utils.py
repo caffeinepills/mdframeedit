@@ -22,6 +22,15 @@ SHADOW_COLORS = ((0, 255, 0, 255), (255, 0, 0, 255), (0, 0, 255, 255))
 WHITE = (255, 255, 255, 255)
 
 
+def write_xml(tree, file_name, encoding=False):
+    with open(file_name, 'wb') as output:
+        if encoding:
+            tree.write(file_name, encoding='utf-8', xml_declaration=True)
+        else:
+            output.write(b'<?xml version="1.0" ?>\n')
+            tree.write(output, encoding='utf-8', xml_declaration=False)
+
+
 def template_image():
     with Image.open(BytesIO(base64.b64decode(_TEMPLATE_PNG))) as source:
         return source.convert('RGBA')

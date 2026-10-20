@@ -8,10 +8,15 @@ For an easier time, use existing FrameData or AnimData to use and modify. Also m
   in its own tab, named after its containing folder.
 * **Save / Save As / Export** - Apply to the active sprite tab. Each tab keeps
   its edits, selection, zoom, and shadow preview independently.
+* **Undo / Redo** - Available under Edit or standard keyboard shortcuts. (History works per tab)
 * **O** - Toggle Offset Display (Action Points), if loaded.
 * **S** - Toggle Shadow Display.
 * **Mouse Scroll** - Zoom in and Out of Preview. Zooming in follows the sprite's offsets as it animates.
 * **Hold Ctrl + Mouse Scroll** - Adjust opacity of loaded sprite.
+
+# Settings
+
+**Auto Reload Artwork** is available under Settings. When enabled, changes to `Anim.png` show up automatically without losing your frame or action point edits. If the image dimensions change, reopen the sheet to load the new layout.
 
 # Save Options
 
@@ -21,7 +26,7 @@ For an easier time, use existing FrameData or AnimData to use and modify. Also m
 
 # Running from source
 
-Use Python 3.9 or newer. From the project directory, activate your virtual
+Use Python 3.10 or newer. From the project directory, activate your virtual
 environment and install the project and its dependencies:
 
 ```shell
@@ -47,6 +52,8 @@ Downloads for Windows, MacOs, and Linux (untested) are provided.
 **New**
 
 * Can now open multiple sprites in separate tabs.
+* Undo and redo changes to actions, frames, offsets, action points, and shadow size.
+* Option to automatically reload changed artwork in single-sheet mode.
 * Now able to modify the sprite action points.
 * Able to adjust opacity for sprites, shadows, and action points.
 * Now can set the shadow size within and preview the size.
@@ -64,7 +71,7 @@ Downloads for Windows, MacOs, and Linux (untested) are provided.
 
 **Changed**
 
-* Now saves to a temporary folder before overwriting the target, in-case there
+* Now saves to a temporary folder before overwriting the target, in-case it fails to save causing loss of the original file.
 * Updated the UI a bit, should resize better and buttons are clearer across platforms.
 
 ---

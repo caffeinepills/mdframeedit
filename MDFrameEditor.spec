@@ -16,7 +16,8 @@ a = Analysis(['main.py'],
              hookspath=[],
              hooksconfig={},
              runtime_hooks=[],
-             excludes=[],
+             # The editor uses PNG and ICO, not Pillow's AVIF codec.
+             excludes=['PIL.AvifImagePlugin', 'PIL._avif'],
              noarchive=False)
 pyz = PYZ(a.pure)
 

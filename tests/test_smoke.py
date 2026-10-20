@@ -1,4 +1,4 @@
-"""Self-contained Windows/macOS smoke tests without a GPU or other test files."""
+"""Self-contained desktop smoke tests without a GPU or other test files."""
 
 from __future__ import annotations
 

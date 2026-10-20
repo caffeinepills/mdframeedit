@@ -35,7 +35,7 @@ Dependencies are declared in `pyproject.toml`.
 
 If you want to build yourself, you can do so via Pyinstaller: `pyinstaller MDFrameEditor.spec` or Nuitka.
 
-Download for a Windows and MacOS version are provided. Untested on Linux, although it should build and work there.
+Downloads for Windows, MacOs, and Linux (untested) are provided.
 
 # Version history
 

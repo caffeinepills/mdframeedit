@@ -5,6 +5,11 @@ Run `python tests/runner/test_smoke.py` to check GUI startup, file watching, and
 CLI conversion. These tests do not depend on the local `tests/local/` or `tests/cli/`
 folders.
 
+Run `python tests/runner/test_action_alias.py` to check ordered fallbacks,
+preservation of existing actions and source files, both XML formats, logging,
+write failures, output isolation, and the background dialog worker. GitHub Actions
+runs these checks separately from the startup smoke tests.
+
 After building, GitHub Actions runs the CLI check again against the packaged
 executable. It converts a tiny sprite in both directions and checks the output.
 Set `MDFRAMEEDIT_TEST_EXECUTABLE` to the executable path to run that check locally:

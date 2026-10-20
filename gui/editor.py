@@ -1,6 +1,8 @@
+from __future__ import annotations
+
+from PIL import Image
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt
-from PIL import Image
 
 from data import VERSION
 
@@ -31,23 +33,23 @@ class IconButton(EditorButton):
 
     def _iconPath(self):
         path = QtGui.QPainterPath()
-        if self.symbol == 'add':
+        if self.symbol == "add":
             path.moveTo(-7, 0)
             path.lineTo(7, 0)
             path.moveTo(0, -7)
             path.lineTo(0, 7)
-        elif self.symbol in ('duplicate', 'copy'):
+        elif self.symbol in ("duplicate", "copy"):
             path.moveTo(-5, 5)
             path.lineTo(-8, 5)
             path.lineTo(-8, -9)
             path.lineTo(4, -9)
             path.lineTo(4, -7)
             path.addRect(-3, -4, 12, 14)
-            if self.symbol == 'copy':
+            if self.symbol == "copy":
                 for y in (0, 4, 7):
                     path.moveTo(0, y)
                     path.lineTo(6, y)
-        elif self.symbol == 'delete':
+        elif self.symbol == "delete":
             path.moveTo(-6, -5)
             path.lineTo(-5, 9)
             path.lineTo(5, 9)
@@ -58,7 +60,7 @@ class IconButton(EditorButton):
             for x in (-2, 2):
                 path.moveTo(x, -3)
                 path.lineTo(x, 6)
-        elif self.symbol == 'paste':
+        elif self.symbol == "paste":
             path.moveTo(-3, -7)
             path.lineTo(-7, -7)
             path.lineTo(-7, 10)
@@ -69,31 +71,31 @@ class IconButton(EditorButton):
             for y in (0, 4, 7):
                 path.moveTo(-3, y)
                 path.lineTo(3, y)
-        elif self.symbol in ('up', 'down'):
+        elif self.symbol in ("up", "down"):
             path.moveTo(-6, -2)
             path.lineTo(0, -8)
             path.lineTo(6, -2)
             path.moveTo(0, -8)
             path.lineTo(0, 8)
-        elif self.symbol == 'restore':
+        elif self.symbol == "restore":
             path.moveTo(-8, -4)
             path.cubicTo(-1, -11, 10, -6, 8, 3)
             path.cubicTo(7, 9, -2, 12, -7, 6)
             path.moveTo(-8, -10)
             path.lineTo(-8, -4)
             path.lineTo(-2, -4)
-        elif self.symbol == 'hit':
+        elif self.symbol == "hit":
             path.addEllipse(QtCore.QRectF(-6, -6, 12, 12))
             path.addEllipse(QtCore.QRectF(-1, -1, 2, 2))
             for x, y in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                 path.moveTo(x * 7, y * 7)
                 path.lineTo(x * 10, y * 10)
-        elif self.symbol == 'rush':
+        elif self.symbol == "rush":
             path.moveTo(1, -10)
             for x, y in ((-7, 2), (-1, 2), (-2, 10), (7, -3), (1, -3)):
                 path.lineTo(x, y)
             path.closeSubpath()
-        elif self.symbol == 'return':
+        elif self.symbol == "return":
             path.moveTo(7, -9)
             path.lineTo(7, 0)
             path.quadTo(7, 6, 0, 6)
@@ -119,7 +121,7 @@ class IconButton(EditorButton):
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         painter.translate(center)
         painter.scale(scale, scale)
-        if self.symbol == 'down':
+        if self.symbol == "down":
             painter.rotate(180)
         painter.setPen(QtGui.QPen(option.palette.buttonText().color(), 1.8,
                                  Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
@@ -173,7 +175,7 @@ class PlaybackButton(EditorButton):
 
     def setPlaying(self, playing):
         self._playing = bool(playing)
-        description = 'Pause animation' if self._playing else 'Play animation'
+        description = "Pause animation" if self._playing else "Play animation"
         self.setAccessibleName(description)
         self.update()
 
@@ -318,9 +320,9 @@ class SheetFramePreview(QtWidgets.QLabel):
     def setFrame(self, image, points, visible, opacity):
         if image.cacheKey() != self.frameImage.cacheKey() and not image.isNull():
             rgba = image.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
-            pixels = Image.frombytes('RGBA', (rgba.width(), rgba.height()), bytes(rgba.constBits()),
-                                    'raw', 'RGBA', rgba.bytesPerLine(), 1)
-            bounds = pixels.getchannel('A').getbbox()
+            pixels = Image.frombytes("RGBA", (rgba.width(), rgba.height()), bytes(rgba.constBits()),
+                                    "raw", "RGBA", rgba.bytesPerLine(), 1)
+            bounds = pixels.getchannel("A").getbbox()
             self.artworkBounds = (QtCore.QRectF(bounds[0], bounds[1], bounds[2] - bounds[0], bounds[3] - bounds[1])
                                   if bounds else QtCore.QRectF(image.rect()))
         self.frameImage = image
@@ -374,24 +376,24 @@ class SheetFramePreview(QtWidgets.QLabel):
                                            self.frameImage.height() * scale))
 
 
-class Ui_MainWindow(object):
+class Ui_MainWindow:
     buttonActions = {
-        'actionAddButton': ('add', 'Add action', 'Create a new animation action.'),
-        'actionDuplicateButton': ('duplicate', 'Duplicate action',
-                                  'Duplicate the selected action. Choosing an existing name replaces that action.'),
-        'actionDeleteButton': ('delete', 'Delete action', 'Delete the selected action.'),
-        'frameUpReorderButton': ('up', 'Move frame up', 'Move the selected frame earlier in the sequence.'),
-        'frameDownReorderButton': ('down', 'Move frame down', 'Move the selected frame later in the sequence.'),
-        'frameDuplicateButton': ('duplicate', 'Duplicate frame', 'Append a copy of the selected frame to the sequence.'),
-        'frameDeleteButton': ('delete', 'Delete frame', 'Remove the selected frame from the sequence.'),
-        'defaultFrameButton': ('restore', 'Restore frame',
-                               'Restore the selected frame to their last saved values.'),
-        'copySequenceButton': ('copy', 'Copy sequence', 'Copy the entire current frame sequence.'),
-        'pasteSequenceButton': ('paste', 'Paste sequence',
-                                'Replace the current sequence with the copied sequence.'),
-        'hitPointButton': ('hit', 'Set hit frame', 'Set the selected frame as the hit frame. Click again to clear it.'),
-        'rushPointButton': ('rush', 'Set rush frame', 'Set the selected frame as the rush frame. Click again to clear it.'),
-        'returnPointButton': ('return', 'Set return frame', 'Set the selected frame as the return frame. Click again to clear it.'),
+        "actionAddButton": ("add", "Add action", "Create a new animation action."),
+        "actionDuplicateButton": ("duplicate", "Duplicate action",
+                                  "Duplicate the selected action. Choosing an existing name replaces that action."),
+        "actionDeleteButton": ("delete", "Delete action", "Delete the selected action."),
+        "frameUpReorderButton": ("up", "Move frame up", "Move the selected frame earlier in the sequence."),
+        "frameDownReorderButton": ("down", "Move frame down", "Move the selected frame later in the sequence."),
+        "frameDuplicateButton": ("duplicate", "Duplicate frame", "Append a copy of the selected frame to the sequence."),
+        "frameDeleteButton": ("delete", "Delete frame", "Remove the selected frame from the sequence."),
+        "defaultFrameButton": ("restore", "Restore frame",
+                               "Restore the selected frame to their last saved values."),
+        "copySequenceButton": ("copy", "Copy sequence", "Copy the entire current frame sequence."),
+        "pasteSequenceButton": ("paste", "Paste sequence",
+                                "Replace the current sequence with the copied sequence."),
+        "hitPointButton": ("hit", "Set hit frame", "Set the selected frame as the hit frame. Click again to clear it."),
+        "rushPointButton": ("rush", "Set rush frame", "Set the selected frame as the rush frame. Click again to clear it."),
+        "returnPointButton": ("return", "Set return frame", "Set the selected frame as the return frame. Click again to clear it."),
     }
 
     def setupUi(self, MainWindow):
@@ -423,14 +425,14 @@ class Ui_MainWindow(object):
             return spinBox
 
         def makeOpacityControls(name, parent):
-            label = QtWidgets.QLabel('Opacity: 100%', parent)
+            label = QtWidgets.QLabel("Opacity: 100%", parent)
             slider = ClickableSlider(Qt.Orientation.Horizontal, parent)
             slider.setRange(0, 255)
             slider.setValue(255)
-            slider.setAccessibleName(name.capitalize() + ' preview opacity')
+            slider.setAccessibleName(name.capitalize() + " preview opacity")
             label.setBuddy(slider)
-            setattr(self, name + 'OpacityLabel', label)
-            setattr(self, name + 'OpacitySlider', slider)
+            setattr(self, name + "OpacityLabel", label)
+            setattr(self, name + "OpacitySlider", slider)
             return label, slider
 
         self.mainSplitter = QtWidgets.QSplitter(Qt.Orientation.Vertical, self.centralwidget)
@@ -449,7 +451,7 @@ class Ui_MainWindow(object):
         self.actionListWidget = TextWidthListWidget(self.groupBox_4, characters=24)
         self.actionLibraryLayout.addWidget(self.actionListWidget)
         self.actionButtonsLayout = makeLayout(QtWidgets.QVBoxLayout)
-        for name in ('actionDuplicateButton', 'actionDeleteButton', 'actionAddButton'):
+        for name in ("actionDuplicateButton", "actionDeleteButton", "actionAddButton"):
             button = makeButton(name, self.groupBox_4)
             button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum, QtWidgets.QSizePolicy.Policy.Maximum)
             self.actionButtonsLayout.addWidget(button)
@@ -464,7 +466,7 @@ class Ui_MainWindow(object):
         self.sheetLibraryLayout.setContentsMargins(0, 0, 0, 0)
         self.sheetFramesGroupBox = QtWidgets.QGroupBox(self.sheetLibraryPanel)
         self.sheetFramesLayout = makeLayout(QtWidgets.QVBoxLayout, self.sheetFramesGroupBox)
-        self.loadedSheetFrameList = TextWidthListWidget(self.sheetFramesGroupBox, sampleText='Frame 100')
+        self.loadedSheetFrameList = TextWidthListWidget(self.sheetFramesGroupBox, sampleText="Frame 100")
         self.sheetFramesLayout.addWidget(self.loadedSheetFrameList)
         self.sheetLibraryLayout.addWidget(self.sheetFramesGroupBox, 1)
         self.horizontalLayout_10.addWidget(self.sheetLibraryPanel)
@@ -484,20 +486,20 @@ class Ui_MainWindow(object):
         self.sheetFrameScopeLabel = QtWidgets.QLabel(self.actionPointsGroupBox)
         self.actionPointsLayout.addWidget(self.sheetFrameScopeLabel)
         self.actionPointsGrid = makeLayout(QtWidgets.QGridLayout)
-        self.actionPointXLabel = QtWidgets.QLabel('X:', self.actionPointsGroupBox)
-        self.actionPointYLabel = QtWidgets.QLabel('Y:', self.actionPointsGroupBox)
+        self.actionPointXLabel = QtWidgets.QLabel("X:", self.actionPointsGroupBox)
+        self.actionPointYLabel = QtWidgets.QLabel("Y:", self.actionPointsGroupBox)
         self.actionPointsGrid.addWidget(self.actionPointXLabel, 0, 1)
         self.actionPointsGrid.addWidget(self.actionPointYLabel, 0, 2)
         self.actionPointSpinBoxes = {}
-        for row, pointName, title in ((1, 'leftHand', 'Left hand'), (2, 'rightHand', 'Right hand'),
-                                      (3, 'head', 'Head'), (4, 'center', 'Center')):
+        for row, pointName, title in ((1, "leftHand", "Left hand"), (2, "rightHand", "Right hand"),
+                                      (3, "head", "Head"), (4, "center", "Center")):
             self.actionPointsGrid.addWidget(QtWidgets.QLabel(title, self.actionPointsGroupBox), row, 0)
             spinBoxes = []
-            for column, axis in ((1, 'X'), (2, 'Y')):
-                spinBox = makeSpinBox(pointName + axis + 'SpinBox', self.actionPointsGroupBox, -32768)
+            for column, axis in ((1, "X"), (2, "Y")):
+                spinBox = makeSpinBox(pointName + axis + "SpinBox", self.actionPointsGroupBox, -32768)
                 spinBox.setMaximum(32767)
                 spinBox.setEnabled(False)
-                spinBox.setAccessibleName(title + ' ' + axis + ' offset')
+                spinBox.setAccessibleName(title + " " + axis + " offset")
                 self.actionPointsGrid.addWidget(spinBox, row, column)
                 spinBoxes.append(spinBox)
             self.actionPointSpinBoxes[pointName] = tuple(spinBoxes)
@@ -548,43 +550,47 @@ class Ui_MainWindow(object):
         self.verticalLayout_9.addWidget(self.animationSpeedSlider, 0, 1)
         self.verticalLayout_9.setColumnStretch(1, 1)
         self.speedTickLabels = SliderTickLabels(self.animationSpeedSlider,
-                                               ('0.1x', '0.25x', '0.5x', '1x', '2x'), self.groupBox_6)
+                                               ("0.1x", "0.25x", "0.5x", "1x", "2x"), self.groupBox_6)
         self.verticalLayout_9.addWidget(self.speedTickLabels, 1, 1)
         self.gridLayout.addWidget(self.groupBox_6, 2, 0)
         self.previewGroupBox = QtWidgets.QGroupBox(self.viewControlsPanel)
         self.previewLayout = makeLayout(QtWidgets.QHBoxLayout, self.previewGroupBox)
         self.previewLayout.setContentsMargins(9, 0, 9, 6)
         self.previewLayout.setSpacing(4)
-        for name, title in (('sprite', 'Sprite'), ('shadow', 'Shadow'), ('actionPoints', 'Action Points')):
+        for name, title in (("sprite", "Sprite"), ("shadow", "Shadow"), ("actionPoints", "Action Points")):
             group = QtWidgets.QGroupBox(title, self.previewGroupBox)
             groupLayout = makeLayout(QtWidgets.QVBoxLayout, group)
             groupLayout.setContentsMargins(6, 0, 6, 6)
             label, slider = makeOpacityControls(name, group)
-            label.setText('100%')
+            label.setText("100%")
             label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            slider.setAccessibleName(title + ' preview opacity')
+            slider.setAccessibleName(title + " preview opacity")
             opacityRow = makeLayout(QtWidgets.QHBoxLayout)
-            opacityRow.addWidget(QtWidgets.QLabel('Opacity', group))
+            opacityRow.addWidget(QtWidgets.QLabel("Opacity", group))
             opacityRow.addStretch(1)
             opacityRow.addWidget(label)
             groupLayout.addLayout(opacityRow)
             groupLayout.addWidget(slider)
-            if name == 'shadow':
-                self.previewShadowCheckBox = QtWidgets.QCheckBox('Preview', group)
+            if name == "shadow":
+                self.previewShadowCheckBox = QtWidgets.QCheckBox("Preview", group)
+                self.previewShadowCheckBox.setToolTip("Show actual shadow size as black.")
                 self.shadowPreviewOptionsLayout = makeLayout(QtWidgets.QHBoxLayout)
                 self.shadowPreviewOptionsLayout.addWidget(self.previewShadowCheckBox)
                 self.shadowSizeComboBox = QtWidgets.QComboBox(group)
-                self.shadowSizeComboBox.addItems(['Small', 'Medium', 'Large'])
-                self.shadowSizeComboBox.setAccessibleName('Shadow size')
+                self.shadowSizeComboBox.addItems(["Small", "Medium", "Large"])
+                self.shadowSizeComboBox.setAccessibleName("Shadow size")
+                self.shadowSizeComboBox.setToolTip(
+                    "Adjusts the shadow size in the frame data.",
+                )
                 self.shadowPreviewOptionsLayout.addWidget(self.shadowSizeComboBox, 1)
                 groupLayout.addLayout(self.shadowPreviewOptionsLayout)
-            elif name == 'actionPoints':
+            elif name == "actionPoints":
                 self.showActionPointsCheckBox = QtWidgets.QCheckBox(group)
                 self.showActionPointsCheckBox.setChecked(False)
-                self.showActionPointsCheckBox.setAccessibleName('Show action points')
+                self.showActionPointsCheckBox.setAccessibleName("Show action points")
                 groupLayout.addWidget(self.showActionPointsCheckBox)
             groupLayout.addStretch(1)
-            setattr(self, name + 'PreviewGroupBox', group)
+            setattr(self, name + "PreviewGroupBox", group)
             self.previewLayout.addWidget(group, 1)
         self.previewSplitter.addWidget(self.verticalFrame_3)
 
@@ -595,9 +601,9 @@ class Ui_MainWindow(object):
         self.directionGroupBox = QtWidgets.QGroupBox(self.inspectorPanel)
         self.gridLayout_2 = makeLayout(QtWidgets.QGridLayout, self.directionGroupBox)
         for name, row, column, angle in (
-                ('buttonUpLeft', 0, 0, -45), ('buttonUp', 0, 1, 0), ('buttonUpRight', 0, 2, 45),
-                ('buttonLeft', 1, 0, 270), ('buttonRight', 1, 2, 90),
-                ('buttonDownLeft', 2, 0, 225), ('buttonDown', 2, 1, 180), ('buttonDownRight', 2, 2, 135)):
+                ("buttonUpLeft", 0, 0, -45), ("buttonUp", 0, 1, 0), ("buttonUpRight", 0, 2, 45),
+                ("buttonLeft", 1, 0, 270), ("buttonRight", 1, 2, 90),
+                ("buttonDownLeft", 2, 0, 225), ("buttonDown", 2, 1, 180), ("buttonDownRight", 2, 2, 135)):
             button = DirectionButton(angle, self.directionGroupBox)
             button.setObjectName(name)
             button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum, QtWidgets.QSizePolicy.Policy.Maximum)
@@ -614,10 +620,10 @@ class Ui_MainWindow(object):
         self.frameForm = makeLayout(QtWidgets.QFormLayout)
         self.frameForm.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.label_6 = QtWidgets.QLabel(self.groupBox_7)
-        self.frameIndexSpinBox = makeSpinBox('frameIndexSpinBox', self.groupBox_7)
+        self.frameIndexSpinBox = makeSpinBox("frameIndexSpinBox", self.groupBox_7)
         self.frameForm.addRow(self.label_6, self.frameIndexSpinBox)
         self.label = QtWidgets.QLabel(self.groupBox_7)
-        self.durationSpinBox = makeSpinBox('durationSpinBox', self.groupBox_7)
+        self.durationSpinBox = makeSpinBox("durationSpinBox", self.groupBox_7)
         self.frameForm.addRow(self.label, self.durationSpinBox)
         self.verticalLayout_3.addLayout(self.frameForm)
         self.mirroredCheckbox = QtWidgets.QCheckBox(self.groupBox_7)
@@ -626,24 +632,24 @@ class Ui_MainWindow(object):
         self.frameDataPanel = QtWidgets.QWidget(self.inspectorPanel)
         self.frameDataLayout = makeLayout(QtWidgets.QHBoxLayout, self.frameDataPanel)
         self.frameDataLayout.setContentsMargins(0, 0, 0, 0)
-        for name, title in (('sprite', 'Sprite Offset'), ('shadow', 'Shadow Offset')):
+        for name, title in (("sprite", "Sprite Offset"), ("shadow", "Shadow Offset")):
             group = QtWidgets.QGroupBox(title, self.frameDataPanel)
             offsetsGroup = group
             form = makeLayout(QtWidgets.QFormLayout, offsetsGroup)
             form.setContentsMargins(6, 0, 6, 6)
             form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
             for axis, labelName, spinName in (
-                    ('X:', 'label_3' if name == 'sprite' else 'label_2', 'xSpinBox' if name == 'sprite' else 'xShadowSpinbox'),
-                    ('Y:', 'label_4' if name == 'sprite' else 'label_5', 'ySpinBox' if name == 'sprite' else 'yShadowSpinBox')):
+                    ("X:", "label_3" if name == "sprite" else "label_2", "xSpinBox" if name == "sprite" else "xShadowSpinbox"),
+                    ("Y:", "label_4" if name == "sprite" else "label_5", "ySpinBox" if name == "sprite" else "yShadowSpinBox")):
                 label = QtWidgets.QLabel(axis, offsetsGroup)
                 setattr(self, labelName, label)
                 spinBox = makeSpinBox(spinName, offsetsGroup, -32768)
                 spinBox.setMaximum(32767)
                 spinBox.setEnabled(False)
                 form.addRow(label, spinBox)
-            setattr(self, 'groupBox_2' if name == 'sprite' else 'groupBox_8', group)
-            setattr(self, name + 'OffsetsGroupBox', offsetsGroup)
-            setattr(self, 'offsetLayout' if name == 'sprite' else 'shadowOffsetLayout', form)
+            setattr(self, "groupBox_2" if name == "sprite" else "groupBox_8", group)
+            setattr(self, name + "OffsetsGroupBox", offsetsGroup)
+            setattr(self, "offsetLayout" if name == "sprite" else "shadowOffsetLayout", form)
             self.frameDataLayout.addWidget(group, 1, Qt.AlignmentFlag.AlignTop)
         self.gridLayout_3.addWidget(self.frameDataPanel, 2, 0, 1, 2, Qt.AlignmentFlag.AlignTop)
         self.gridLayout_3.setColumnStretch(0, 1)
@@ -657,8 +663,8 @@ class Ui_MainWindow(object):
         self.sequenceBody.addWidget(self.animationFrameList, 1)
         self.sequenceButtons = makeLayout(QtWidgets.QGridLayout)
         self.sequenceButtonWidgets = []
-        for name in ('frameUpReorderButton', 'frameDownReorderButton', 'frameDuplicateButton',
-                     'frameDeleteButton', 'defaultFrameButton'):
+        for name in ("frameUpReorderButton", "frameDownReorderButton", "frameDuplicateButton",
+                     "frameDeleteButton", "defaultFrameButton"):
             button = makeButton(name, self.groupBox_3)
             button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum, QtWidgets.QSizePolicy.Policy.Maximum)
             self.sequenceButtons.addWidget(button, len(self.sequenceButtonWidgets), 0)
@@ -667,11 +673,11 @@ class Ui_MainWindow(object):
         self.sequenceBody.addLayout(self.sequenceButtons)
         self.sequenceLayout.addLayout(self.sequenceBody, 1)
         self.sequenceClipboard = makeLayout(QtWidgets.QHBoxLayout)
-        self.sequenceClipboard.addWidget(makeButton('copySequenceButton', self.groupBox_3))
-        self.sequenceClipboard.addWidget(makeButton('pasteSequenceButton', self.groupBox_3))
+        self.sequenceClipboard.addWidget(makeButton("copySequenceButton", self.groupBox_3))
+        self.sequenceClipboard.addWidget(makeButton("pasteSequenceButton", self.groupBox_3))
         self.sequenceLayout.addLayout(self.sequenceClipboard)
         self.sequenceMarkers = makeLayout(QtWidgets.QHBoxLayout)
-        for name in ('hitPointButton', 'returnPointButton', 'rushPointButton'):
+        for name in ("hitPointButton", "returnPointButton", "rushPointButton"):
             self.sequenceMarkers.addWidget(makeButton(name, self.groupBox_3))
         self.sequenceLayout.addLayout(self.sequenceMarkers)
         self.viewControlsLayout.addWidget(self.inspectorPanel, 0, 0)
@@ -843,10 +849,10 @@ class Ui_MainWindow(object):
         self.animationSpeedLabel.setText(_translate("MainWindow", "1x"))
         self.directionGroupBox.setTitle(_translate("MainWindow", "Direction"))
         for button, name in (
-                (self.buttonUpLeft, 'Up-left'), (self.buttonUp, 'Up'), (self.buttonUpRight, 'Up-right'),
-                (self.buttonLeft, 'Left'), (self.buttonRight, 'Right'),
-                (self.buttonDownLeft, 'Down-left'), (self.buttonDown, 'Down'),
-                (self.buttonDownRight, 'Down-right')):
+                (self.buttonUpLeft, "Up-left"), (self.buttonUp, "Up"), (self.buttonUpRight, "Up-right"),
+                (self.buttonLeft, "Left"), (self.buttonRight, "Right"),
+                (self.buttonDownLeft, "Down-left"), (self.buttonDown, "Down"),
+                (self.buttonDownRight, "Down-right")):
             description = _translate("MainWindow", name)
             button.setAccessibleName(description)
         self.groupBox_7.setTitle(_translate("MainWindow", "Frame Data"))

@@ -41,6 +41,7 @@ from PySide6.QtWidgets import QFileDialog, QInputDialog, QListWidgetItem
 
 from conversion import AnimationSerialization, SpriteDocument
 from data import (
+    FD_STR,
     VERSION,
     ActionPoints,
     AnimationSequence,
@@ -411,6 +412,7 @@ class PygletWidget(QOpenGLWidget):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
         self._update_camera_focus()
+        self._update_guide_lines()
         self._update_sprite_bounds()
         with self.camera:
             self.batch.draw()
@@ -424,6 +426,23 @@ class PygletWidget(QOpenGLWidget):
         else:
             self.camera.x = self.width() // 2
             self.camera.y = self.height() // 3
+
+    def _update_guide_lines(self) -> None:
+        if not self.lines:
+            return
+        zoom = self.camera.zoom
+        # Convert viewport edges back to world coordinates
+        # This way origin spans the view at every zoom level.
+        left = self.camera.x - (self.width() // 2) / zoom
+        bottom = self.camera.y - (self.height() // 3) / zoom
+        horizontal, vertical = self.lines
+        horizontal.position = (left - 1 / zoom, self.height() // 3)
+        horizontal.x2 = left + (self.width() + 1) / zoom
+        horizontal.y2 = self.height() // 3
+        vertical.position = (self.width() // 2, bottom - 1 / zoom)
+        vertical.x2 = self.width() // 2
+        vertical.y2 = bottom + (self.height() + 1) / zoom
+        horizontal.width = vertical.width = 1 / zoom
 
     def _update_sprite_bounds(self) -> None:
         sprite = self.editor.sprite
@@ -836,6 +855,17 @@ class AnimationEditor(AnimationSerialization):
         self.undoAction = self.undoStack.createUndoAction(window, "Undo")
         self.redoAction = self.undoStack.createRedoAction(window, "Redo")
         self.editMenu.addActions([self.undoAction, self.redoAction])
+        self.editMenu.addSeparator()
+        self.copyAnimationSettingsAction = self.editMenu.addAction(
+            "Copy Animation Settings", self.copyAnimationSettings
+        )
+        self.pasteAnimationSettingsAction = self.editMenu.addAction(
+            "Paste Animation Settings", self.pasteAnimationSettings
+        )
+        self.copyAnimationSettingsAction.setEnabled(False)
+        self.pasteAnimationSettingsAction.setEnabled(False)
+        self.animationSettingsClipboard: AnimGroup | None = None
+        self.editMenu.aboutToShow.connect(self.updateAnimationSettingsActions)
         if document_host is None:
             self.undoAction.setShortcuts(QtGui.QKeySequence.StandardKey.Undo)
             self.redoAction.setShortcuts(QtGui.QKeySequence.StandardKey.Redo)
@@ -1635,6 +1665,165 @@ class AnimationEditor(AnimationSerialization):
     def copy_sequence(self) -> None:
         if self.current_sequence:
             self.copied_sequence = copy.deepcopy(self.current_sequence)
+
+    def updateAnimationSettingsActions(self) -> None:
+        """Update menu availability for the selected action and shared clipboard."""
+        owner = self.document_host or self
+        self.copyAnimationSettingsAction.setEnabled(
+            self.current_anim_group is not None
+            and any(sequence.frames for sequence in self.current_anim_group.directions)
+        )
+        self.pasteAnimationSettingsAction.setEnabled(
+            self.current_anim_group is not None
+            and owner.animationSettingsClipboard is not None
+        )
+
+    def copyAnimationSettings(self) -> None:
+        """Keep a detached settings snapshot available across sprite tabs."""
+        if self.current_anim_group is None:
+            QtWidgets.QMessageBox.warning(
+                self.document_host or self.window,
+                "Cannot Copy Animation Settings",
+                "No source animation is selected. Select an animation, then copy again.",
+            )
+            return
+        if not any(sequence.frames for sequence in self.current_anim_group.directions):
+            QtWidgets.QMessageBox.warning(
+                self.document_host or self.window,
+                "Cannot Copy Animation Settings",
+                f"Source '{self.current_anim_group.name}' has no frames. "
+                "Select an animation with frames, then copy again.",
+            )
+            return
+        owner = self.document_host or self
+        owner.animationSettingsClipboard = copy.deepcopy(self.current_anim_group)
+        if self.document_host is not None:
+            for editor in self.document_host._editors.values():
+                editor.updateAnimationSettingsActions()
+        else:
+            self.updateAnimationSettingsActions()
+        self.ui.statusBar.showMessage(
+            f"Copied animation settings from {self.current_anim_group.name}.", 5000
+        )
+
+    @undoable("Paste Animation Settings")
+    def pasteAnimationSettings(self) -> None:
+        """Copy timing and movement while keeping destination artwork and sharing."""
+        source = (self.document_host or self).animationSettingsClipboard
+        target = self.current_anim_group
+        if source is None:
+            QtWidgets.QMessageBox.warning(
+                self.document_host or self.window,
+                "Cannot Paste Animation Settings",
+                "No animation settings have been copied. "
+                "Copy settings from a source animation, then paste again.",
+            )
+            return
+        if target is None:
+            QtWidgets.QMessageBox.warning(
+                self.document_host or self.window,
+                "Cannot Paste Animation Settings",
+                f"Settings were copied from '{source.name}', but no destination "
+                "animation is selected. Select a destination, then paste again.",
+            )
+            return
+        # Validate every direction before changing any destination frame.
+        assignments: dict[int, tuple[AnimFrame, AnimFrame]] = {}
+        frameLocations: dict[int, tuple[int, int]] = {}
+        for direction, (sourceSequence, targetSequence) in enumerate(
+            zip(source.directions, target.directions)
+        ):
+            if len(sourceSequence.frames) != len(targetSequence.frames):
+                QtWidgets.QMessageBox.warning(
+                    self.document_host or self.window,
+                    "Cannot Paste Animation Settings",
+                    f"Frame counts differ for {FD_STR[direction].title()}:\n"
+                    f"Source '{source.name}': {len(sourceSequence.frames)} frames\n"
+                    f"Destination '{target.name}': {len(targetSequence.frames)} frames\n\n"
+                    "Add or remove frames so this direction has the same frame count "
+                    "in both animations, then paste again. "
+                    "If you edit the source, copy its settings again first.",
+                )
+                return
+            for frameNumber, (sourceFrame, targetFrame) in enumerate(
+                zip(sourceSequence.frames, targetSequence.frames), start=1
+            ):
+                previous = assignments.get(id(targetFrame))
+                if previous is not None:
+                    previousFrame = previous[1]
+                    if (
+                        previousFrame.duration != sourceFrame.duration
+                        or previousFrame.sprite_offset != sourceFrame.sprite_offset
+                        or previousFrame.shadow_offset != sourceFrame.shadow_offset
+                    ):
+                        previousDirection, previousNumber = frameLocations[id(targetFrame)]
+                        sharedFrames = (
+                            f"{FD_STR[previousDirection].title()} frame {previousNumber} and "
+                            f"{FD_STR[direction].title()} frame {frameNumber}"
+                        )
+                        differences = []
+                        for label, previousValue, currentValue in (
+                            ("Duration", previousFrame.duration, sourceFrame.duration),
+                            ("Sprite offset", previousFrame.sprite_offset.data(),
+                             sourceFrame.sprite_offset.data()),
+                            ("Shadow offset", previousFrame.shadow_offset.data(),
+                             sourceFrame.shadow_offset.data()),
+                        ):
+                            if previousValue != currentValue:
+                                differences.append(
+                                    f"{label}: {previousValue} vs {currentValue}"
+                                )
+                        QtWidgets.QMessageBox.warning(
+                            self.document_host or self.window,
+                            "Cannot Paste Animation Settings",
+                            f"Destination '{target.name}' shares {sharedFrames}.\n\n"
+                            f"In source '{source.name}', those same frames differ "
+                            "(values in the order above):\n"
+                            + "\n".join(differences)
+                            + "\n\n"
+                            "Make their durations and sprite/shadow offsets match, "
+                            "then copy again.",
+                        )
+                        return
+                assignments[id(targetFrame)] = (targetFrame, sourceFrame)
+                frameLocations[id(targetFrame)] = (direction, frameNumber)
+        if (
+            not target.copy_name
+            and (target.rush_frame, target.hit_frame, target.return_frame)
+            == (source.rush_frame, source.hit_frame, source.return_frame)
+            and all(
+                targetFrame.duration == sourceFrame.duration
+                and targetFrame.sprite_offset == sourceFrame.sprite_offset
+                and targetFrame.shadow_offset == sourceFrame.shadow_offset
+                for targetFrame, sourceFrame in assignments.values()
+            )
+        ):
+            self.ui.statusBar.showMessage("Animation settings already match.", 5000)
+            return
+        for targetFrame, sourceFrame in assignments.values():
+            targetFrame.duration = sourceFrame.duration
+            targetFrame.sprite_offset = copy.deepcopy(sourceFrame.sprite_offset)
+            targetFrame.shadow_offset = copy.deepcopy(sourceFrame.shadow_offset)
+        target.rush_frame = source.rush_frame
+        target.hit_frame = source.hit_frame
+        target.return_frame = source.return_frame
+        target.copy_name = ""
+        target.modified = True
+        for item in self._get_action_list_items():
+            if item.anim_group is target:
+                item.update_text()
+        for item in self._get_frame_list_items():
+            item.update_text()
+        selected = self.ui.animationFrameList.currentItem()
+        selectedSheetFrame = self.selected_sheet_frame
+        if selected is not None:
+            self.set_anim_frame_values(selected.anim_frame)
+        self.selectSheetFrame(selectedSheetFrame)
+        if not self.animating:
+            self.set_animation()
+        self.ui.statusBar.showMessage(
+            f"Pasted animation settings from {source.name} onto {target.name}.", 5000
+        )
 
     @undoable("Paste Sequence")
     def paste_sequence(self) -> None:
@@ -2620,6 +2809,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         self._holders: dict[QtWidgets.QWidget, QtWidgets.QMainWindow] = {}
         self._saved_states: dict[QtWidgets.QWidget, tuple[object, ...]] = {}
         self._active_editor: AnimationEditor | None = None
+        self.animationSettingsClipboard: AnimGroup | None = None
         self.documentTabs = QtWidgets.QTabWidget(self)
         self.documentTabs.setObjectName("documentTabs")
         self.documentTabs.setDocumentMode(True)
@@ -2976,6 +3166,8 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         editor.editMenu.deleteLater()
         editor.undoAction.deleteLater()
         editor.redoAction.deleteLater()
+        editor.copyAnimationSettingsAction.deleteLater()
+        editor.pasteAnimationSettingsAction.deleteLater()
         editor.setArtworkReloadEnabled(False)
         editor.artworkWatcher.deleteLater()
         editor.artworkReloadTimer.deleteLater()

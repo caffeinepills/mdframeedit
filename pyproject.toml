@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "MD Frame Editor"
+name = "mdframeedit"
 dynamic = ["version"]
 description = "Frame editor for FrameData.xml and AnimData.xml sprite sheets."
 readme = "README.md"

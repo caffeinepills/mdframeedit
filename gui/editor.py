@@ -456,6 +456,10 @@ class TextWidthListWidget(QtWidgets.QListWidget):
 class SheetFramePreview(QtWidgets.QLabel):
     """Pixel-aligned sheet artwork and attachment markers, redrawn on resize."""
 
+    pointDragStarted = QtCore.Signal()
+    pointDragged = QtCore.Signal(int, int, int)
+    pointDragFinished = QtCore.Signal(bool)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.frameImage = QtGui.QImage()
@@ -465,10 +469,20 @@ class SheetFramePreview(QtWidgets.QLabel):
         self.pointsOpacity = 255
         self.includeWhitespace = False
         self.showBounds = False
+        self.dragPoint: int | None = None
+        self.dragging = False
+        self.dragOrigin = QtCore.QPointF()
+        self.dragScale = 1.0
+        self.pressPosition = QtCore.QPointF()
+        self.pressPoint = (0, 0)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.setToolTip("Drag an action point dot to move it. Escape cancels the drag.")
         self.setMinimumSize(100, 80)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Ignored)
 
     def setFrame(self, image, points, visible, opacity):
+        if image.cacheKey() != self.frameImage.cacheKey() or not visible or not opacity:
+            self.finishDrag(True)
         if image.cacheKey() != self.frameImage.cacheKey() and not image.isNull():
             rgba = image.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
             pixels = Image.frombytes("RGBA", (rgba.width(), rgba.height()), bytes(rgba.constBits()),
@@ -486,14 +500,15 @@ class SheetFramePreview(QtWidgets.QLabel):
         self.setFrame(pixmap.toImage(), [], self.pointsVisible, self.pointsOpacity)
 
     def clear(self):
+        self.finishDrag(True)
         self.frameImage = QtGui.QImage()
         self.points = []
         self.update()
 
-    def paintEvent(self, event):
-        if self.frameImage.isNull():
-            super().paintEvent(event)
-            return
+    def frameTransform(self) -> tuple[QtCore.QPointF, float]:
+        """Shared painting/hit-test transform, held steady during a gesture."""
+        if self.dragPoint is not None:
+            return self.dragOrigin, self.dragScale
         cellBounds = QtCore.QRectF(self.frameImage.rect())
         bounds = QtCore.QRectF(self.artworkBounds)
         if self.pointsVisible:
@@ -504,12 +519,86 @@ class SheetFramePreview(QtWidgets.QLabel):
         available = QtCore.QRectF(self.contentsRect().adjusted(6, 6, -6, -6))
         cellScale = min(available.width() / cellBounds.width(), available.height() / cellBounds.height())
         artworkScale = min(available.width() / bounds.width(), available.height() / bounds.height()) * 0.9
-        scale = cellScale if self.includeWhitespace else min(cellScale * 2, artworkScale)
+        scale = max(0.01, cellScale if self.includeWhitespace else min(cellScale * 2, artworkScale))
         if self.includeWhitespace:
             bounds = cellBounds
         if scale >= 1:
             scale = int(scale)
         origin = available.center() - bounds.center() * scale
+        return origin, scale
+
+    def finishDrag(self, cancelled: bool = False) -> None:
+        active = self.dragging
+        self.dragPoint = None
+        self.dragging = False
+        if active:
+            self.pointDragFinished.emit(cancelled)
+        self.update()
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if (event.button() != Qt.MouseButton.LeftButton or self.frameImage.isNull()
+                or not self.pointsVisible or not self.pointsOpacity):
+            return super().mousePressEvent(event)
+        origin, scale = self.frameTransform()
+        hits = []
+        for i, (x, y, _) in enumerate(self.points):
+            center = origin + QtCore.QPointF(x + 0.5, y + 0.5) * scale
+            distance = (event.position() - center).manhattanLength()
+            if QtCore.QRectF(center.x() - max(4, scale / 2), center.y() - max(4, scale / 2),
+                            max(8, scale), max(8, scale)).contains(event.position()):
+                hits.append((distance, -i, i))
+        if not hits:
+            return super().mousePressEvent(event)
+        # Prefer the topmost painted point when markers overlap exactly.
+        self.dragPoint = min(hits)[2]
+        self.pressPoint = self.points[self.dragPoint][:2]
+        self.pressPosition = event.position()
+        self.dragOrigin, self.dragScale = origin, scale
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        event.accept()
+
+    def movePoint(self, position: QtCore.QPointF) -> None:
+        if self.dragPoint is None:
+            return
+        delta = position - self.pressPosition
+        if not self.dragging:
+            if delta.manhattanLength() < QtWidgets.QApplication.startDragDistance():
+                return
+            self.dragging = True
+            self.pointDragStarted.emit()
+        x = round(self.pressPoint[0] + delta.x() / self.dragScale)
+        y = round(self.pressPoint[1] + delta.y() / self.dragScale)
+        self.pointDragged.emit(self.dragPoint, x, y)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self.dragPoint is None:
+            return super().mouseMoveEvent(event)
+        self.movePoint(event.position())
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() != Qt.MouseButton.LeftButton or self.dragPoint is None:
+            return super().mouseReleaseEvent(event)
+        self.movePoint(event.position())
+        self.finishDrag()
+        event.accept()
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.key() == Qt.Key.Key_Escape and self.dragPoint is not None:
+            self.finishDrag(True)
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        self.finishDrag(True)
+        super().hideEvent(event)
+
+    def paintEvent(self, event):
+        if self.frameImage.isNull():
+            super().paintEvent(event)
+            return
+        origin, scale = self.frameTransform()
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, False)
         painter.drawImage(QtCore.QRectF(origin.x(), origin.y(), self.frameImage.width() * scale,

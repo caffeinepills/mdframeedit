@@ -1038,6 +1038,10 @@ class AnimationEditor(AnimationSerialization):
         self.ui.shadowSizeComboBox.currentIndexChanged.connect(self.apply_shadow_size)
         self.ui.previewShadowCheckBox.toggled.connect(self._refresh_shadow_display)
         self.ui.showActionPointsCheckBox.toggled.connect(self.setActionPointsVisible)
+        self.pointDragState: tuple[int, EditState] | None = None
+        self.ui.sheetFramePicture.pointDragStarted.connect(self.beginPointDrag)
+        self.ui.sheetFramePicture.pointDragged.connect(self.dragActionPoint)
+        self.ui.sheetFramePicture.pointDragFinished.connect(self.finishPointDrag)
         self.ui.spriteOpacitySlider.valueChanged.connect(
             partial(self.setPreviewOpacity, "sprite")
         )
@@ -1237,6 +1241,8 @@ class AnimationEditor(AnimationSerialization):
             self.image_grid is None or not 0 <= index < len(self.image_grid)
         ):
             index = None
+        if index != self.selected_sheet_frame:
+            self.ui.sheetFramePicture.finishDrag(True)
         self.selected_sheet_frame = index
         with QtCore.QSignalBlocker(self.ui.loadedSheetFrameList):
             row = next(
@@ -1388,6 +1394,38 @@ class AnimationEditor(AnimationSerialization):
         self.updateOnionPreview(frame)
         self.openGLWidget.update()
         self.ui.statusBar.showMessage("Artwork reloaded.", 3000)
+
+    def beginPointDrag(self) -> None:
+        index = self.selected_sheet_frame
+        if index is not None and index in self.action_points:
+            self.pointDragState = (index, self.captureEditState())
+
+    def dragActionPoint(self, point: int, x: int, y: int) -> None:
+        if self.pointDragState is None:
+            return
+        index, _ = self.pointDragState
+        name = ("left_hand", "center", "right_hand", "head")[point]
+        offset = Offset(max(-32768, min(32767, x - self.frame_width // 2)),
+                        max(-32768, min(32767, y - self.frame_height // 2)))
+        body = self.action_points[index]
+        if getattr(body, name) == offset:
+            return
+        setattr(body, name, offset)
+        self.selectSheetFrame(index)
+        self.refreshActionPointEdits(index)
+
+    def finishPointDrag(self, cancelled: bool) -> None:
+        state, self.pointDragState = self.pointDragState, None
+        if state is None:
+            return
+        _, before = state
+        after = self.captureEditState()
+        if before.signature == after.signature:
+            return
+        if cancelled:
+            self.restoreEditState(before)
+        else:
+            self.undoStack.push(SpriteEditCommand(self, "Move Action Point", before, after))
 
     @undoable("Change Action Point")
     def actionPointChanged(self, pointName: str, value: int) -> None:
@@ -2674,6 +2712,7 @@ class AnimationEditor(AnimationSerialization):
 
     def clear(self) -> None:
         """Clear everything so we can load a new sprite."""
+        self.ui.sheetFramePicture.finishDrag(True)
         self.clearOnionPreview()
         self.undoStack.clear()
         self.savedEditSignature = None

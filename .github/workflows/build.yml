@@ -69,6 +69,9 @@ jobs:
       - name: Test format adapters
         run: python tests/runner/test_format_adapters.py
 
+      - name: Test project builds
+        run: python tests/runner/test_project_build.py
+
       - name: Smoke test editor and CLI
         if: runner.os != 'Linux'
         # This file has no dependency on the rest of the local test suite.

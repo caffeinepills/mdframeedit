@@ -19,7 +19,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from conversion import SpriteDocument
 from data import ActionPoints, AnimationSequence, AnimFrame, AnimGroup, Offset, SheetFormat
-from formats.native import DURATION, FLIP, FRAME_INDEX, document_data
+from formats.native import DURATION, FLIP, FRAME_INDEX, document_data, read_texture_layout
+from formats.packing import pack_texture, unpack_texture
 from utils import FormatError
 
 
@@ -152,7 +153,7 @@ class NativeFormatTest(unittest.TestCase):
         target = self.save()
         original = json.loads(target.read_text())
         mutations = [
-            (lambda d: d.update(version=3), "version"),
+            (lambda d: d.update(version=99), "version"),
             (lambda d: d.update(texture="../outside.png"), "filename"),
             (lambda d: d.update(extra=True), "unknown"),
             (lambda d: d.update(frame_size=[True, 8]), "integer"),
@@ -167,6 +168,13 @@ class NativeFormatTest(unittest.TestCase):
             (lambda d: d["frames"][0].pop(), "seven"),
             (lambda d: d["frames"].append([0, 1, False, 0, 0, 0, 0]), "unreferenced"),
             (lambda d: d["animations"]["Walk"].update(hit_frame=2), "outside"),
+            (lambda d: d.update(grid_size=[0, 1]), "integer"),
+            (lambda d: d["regions"].pop(), "per logical cell"),
+            (lambda d: d["regions"][0].__setitem__(0, 999), "outside"),
+            (lambda d: d["regions"][0].__setitem__(2, 0), "positive"),
+            (lambda d: d["regions"][0].__setitem__(4, 999), "logical frame"),
+            (lambda d: d["regions"][0].__setitem__(0, True), "integer"),
+            (lambda d: d["regions"][0].append(1), "six"),
         ]
         for mutate, message in mutations:
             with self.subTest(message=message):
@@ -181,7 +189,7 @@ class NativeFormatTest(unittest.TestCase):
 
     def test_engine_uses_parsed_tables_without_resolving_copies_or_defaults(self):
         data = json.loads(self.save().read_bytes())
-        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["version"], 3)
         self.assertEqual(list(data["animations"]), ["Walk", "Alias"])
         directions = data["animations"]["Walk"]["directions"]
         alias_directions = data["animations"]["Alias"]["directions"]
@@ -223,6 +231,7 @@ class NativeFormatTest(unittest.TestCase):
             ]]}],
         }
         target.write_text(json.dumps(legacy), encoding="utf-8")
+        self.document.sheet_image.save(target.with_suffix(".png"))
         before = target.read_bytes()
         loaded = SpriteDocument.load(target)
         self.assertEqual(target.read_bytes(), before)
@@ -230,12 +239,120 @@ class NativeFormatTest(unittest.TestCase):
         self.assertEqual(loaded.groups[0].directions[0].frames[0].sprite_offset, Offset(-3, 2))
         self.assertFalse(loaded.shadow_size_present)
         self.save(loaded)
-        self.assertEqual(json.loads(target.read_bytes())["version"], 2)
+        self.assertEqual(json.loads(target.read_bytes())["version"], 3)
         self.assert_document_equal(loaded, SpriteDocument.load(target))
         legacy["animations"][0]["directions"][0][0]["duration"] = False
         target.write_text(json.dumps(legacy), encoding="utf-8")
+        self.document.sheet_image.save(target.with_suffix(".png"))
         with self.assertRaisesRegex(FormatError, "integer"):
             SpriteDocument.load(target)
+
+    def test_version_two_grid_is_read_without_rewriting_and_upgrades_on_save(self):
+        target = self.save()
+        legacy = document_data(self.document, "Sprite.png")
+        legacy["version"] = 2
+        del legacy["grid_size"], legacy["regions"]
+        target.write_text(json.dumps(legacy), encoding="utf-8")
+        self.document.sheet_image.save(target.with_suffix(".png"))
+        before = target.read_bytes()
+        loaded = SpriteDocument.load(target)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertIsNone(read_texture_layout(target))
+        self.assert_document_equal(self.document, loaded)
+        self.save(loaded)
+        self.assertEqual(json.loads(target.read_bytes())["version"], 3)
+        self.assert_document_equal(loaded, SpriteDocument.load(target))
+
+    def test_packed_regions_preserve_world_pixels_for_even_and_odd_flipped_frames(self):
+        for width, height in ((6, 8), (7, 9)):
+            image = Image.new("RGBA", (width * 2, height * 2))
+            image.putpixel((1, 2), (70, 90, 120, 128))
+            image.putpixel((3, 4), (40, 80, 10, 255))
+            image.putpixel((width + 2, height + 1), (120, 40, 10, 1))
+            document = SpriteDocument(image, width, height, groups=[AnimGroup(-1, "Idle", directions=[
+                AnimationSequence([AnimFrame(frame_index=0, duration=3, flip=flip,
+                    sprite_offset=Offset(-3, 5)) for flip in (0, 1)])
+            ])], action_points={2: ActionPoints(Offset(-8, 12), Offset(), Offset(), Offset())})
+            target = self.save(document)
+            data = json.loads(target.read_bytes())
+            with Image.open(target.with_suffix(".png")) as source:
+                packed = source.convert("RGBA")
+            self.assertLess(packed.width * packed.height, image.width * image.height)
+            self.assertEqual(data["grid_size"], [2, 2])
+            self.assertEqual(data["regions"][1:3], [None, None])
+            self.assertIsNotNone(data["regions"][3])  # Unreferenced artwork survives.
+            self.assert_document_equal(document, SpriteDocument.load(target))
+            x, y, w, h, tx, ty = data["regions"][0]
+            crop = packed.crop((x, y, x + w, y + h))
+            for flip in (False, True):
+                expected = {}
+                original = document.image_grid[0]
+                for py in range(height):
+                    for px in range(width):
+                        color = original.getpixel((px, py))
+                        if color[3]:
+                            wx = (width - 1 - px if flip else px) - width // 2 - 3
+                            expected[wx, py - height // 2 + 5] = color
+                actual = {}
+                left = (width - tx - w if flip else tx) - width // 2 - 3
+                for py in range(h):
+                    for px in range(w):
+                        color = crop.getpixel((w - 1 - px if flip else px, py))
+                        if color[3]:
+                            actual[left + px, ty + py - height // 2 + 5] = color
+                self.assertEqual(actual, expected)
+
+    def test_completely_empty_atlas_and_missing_points_keep_logical_cells(self):
+        self.document.sheet_image = Image.new("RGBA", self.document.sheet_image.size)
+        self.document.action_points.clear()
+        target = self.save()
+        data = json.loads(target.read_bytes())
+        self.assertEqual(data["regions"], [None, None])
+        with Image.open(target.with_suffix(".png")) as packed:
+            self.assertEqual(packed.size, (1, 1))
+        self.assert_document_equal(self.document, SpriteDocument.load(target))
+
+    def test_each_crop_has_a_transparent_gutter_including_fallback_and_texture_edges(self):
+        image = Image.new("RGBA", (12, 10))
+        for index in range(6):
+            left, top = index % 3 * 4, index // 3 * 5
+            for y in range(top, top + 5 - index % 3):
+                for x in range(left, left + 4 - index % 2):
+                    image.putpixel((x, y), (40 + index, 80, 120, 128))
+        for fallback in (False, True):
+            with self.subTest(fallback=fallback):
+                if fallback:
+                    with patch("formats.packing._place", return_value=None):
+                        packed, layout = pack_texture(image, (4, 5))
+                else:
+                    packed, layout = pack_texture(image, (4, 5))
+                self.assertEqual(unpack_texture(packed, layout).tobytes(), image.tobytes())
+                for region in layout.regions:
+                    x, y, w, h, tx, ty = region
+                    self.assertGreaterEqual(x, 1)
+                    self.assertGreaterEqual(y, 1)
+                    self.assertLess(x + w, packed.width)
+                    self.assertLess(y + h, packed.height)
+                    for px in range(x - 1, x + w + 1):
+                        self.assertEqual(packed.getpixel((px, y - 1)), (0, 0, 0, 0))
+                        self.assertEqual(packed.getpixel((px, y + h)), (0, 0, 0, 0))
+                    for py in range(y - 1, y + h + 1):
+                        self.assertEqual(packed.getpixel((x - 1, py)), (0, 0, 0, 0))
+                        self.assertEqual(packed.getpixel((x + w, py)), (0, 0, 0, 0))
+
+    def test_packed_artwork_reload_uses_saved_regions_and_rejects_layout_changes(self):
+        target = self.save()
+        layout = read_texture_layout(target)
+        self.assertIsNotNone(layout)
+        with Image.open(target.with_suffix(".png")) as source:
+            packed = source.convert("RGBA")
+        x, y, w, h, tx, ty = layout.regions[0]
+        packed.putpixel((x, y), (90, 70, 40, 128))
+        restored = unpack_texture(packed, layout)
+        self.assertEqual(restored.getpixel((tx, ty)), (90, 70, 40, 128))
+        self.assertEqual(restored.crop((6, 0, 12, 8)).tobytes(), self.document.image_grid[1].tobytes())
+        with self.assertRaisesRegex(FormatError, "Reopen"):
+            unpack_texture(Image.new("RGBA", (packed.width + 1, packed.height)), layout)
 
     def test_failed_save_rolls_back_json_and_texture(self):
         target = self.save()

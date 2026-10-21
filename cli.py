@@ -50,7 +50,7 @@ def positive_integer(value):
 def create_parser():
     parser = argparse.ArgumentParser(
         description="Convert native JSON and single-sheet/multi-sheet XML sprites without opening the editor.",
-        epilog="To inspect artwork instead, use: palette INPUT (XML file, sprite folder, or PNG sheet).",
+        epilog="Other commands: palette INPUT; build INPUT --profile PROFILE.json -o OUTPUT.",
     )
     parser.add_argument("input", type=Path, help="source JSON/XML file or sprite folder")
     parser.add_argument(
@@ -275,6 +275,8 @@ def palette_main(argv: list[str]) -> int:
 def main(argv=None):
     multiprocessing.freeze_support()
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "build":
+        return build_main(arguments[1:])
     if arguments and arguments[0] == "palette":
         return palette_main(arguments[1:])
     if arguments and arguments[0] == "convert":
@@ -322,6 +324,31 @@ def main(argv=None):
         return 1
     print(f"Converted {successes}; failed {failures}.")
     return 1 if failures else 0
+
+
+def build_main(argv: list[str]) -> int:
+    """Build one derived game sprite using an editable project profile."""
+    from project_build import build_sprite, load_profile
+    from utils import FormatError
+
+    parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} build",
+        description="Build derived native JSON, packed PNG and palette from a sprite and JSON project profile.")
+    parser.add_argument("input", type=Path, help="source sprite JSON/XML file or sprite folder")
+    parser.add_argument("--profile", type=Path, required=True, help="editable project profile JSON")
+    parser.add_argument("-o", "--output", type=Path, required=True, help="separate build output folder")
+    parser.add_argument("--overwrite", action="store_true", help="replace generated files in an existing output folder")
+    args = parser.parse_args(argv)
+    try:
+        # Protect the profile itself if someone points output at its directory.
+        managed = {"sprite.json", "sprite.png", "palette.json", "build.json"}
+        if args.profile.resolve().parent == args.output.resolve() and args.profile.name.casefold() in managed:
+            raise FormatError("Build output would overwrite the project profile.")
+        target = build_sprite(args.input, load_profile(args.profile), args.output, overwrite=args.overwrite)
+    except (FormatError, OSError, ValueError, ET.ParseError) as error:
+        print(f"Build failed: {error}", file=sys.stderr)
+        return 1
+    print(f"Built {target}")
+    return 0
 
 
 if __name__ == "__main__":

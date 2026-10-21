@@ -53,6 +53,8 @@ from data import (
     SheetFormat, EditState,
 )
 from formats import SpriteFormat, validate_export
+from formats.native import read_texture_layout
+from formats.packing import TextureLayout, unpack_texture
 from gui.batchadd import ActionAliasDialog
 from gui.batchedit import BatchEditDialog
 from gui.editor import Ui_MainWindow
@@ -825,6 +827,7 @@ class AnimationEditor(AnimationSerialization):
         self.artworkPath: pathlib.Path | None = None
         # Hash for file change.
         self.artworkDigest: bytes | None = None
+        self.nativeTextureLayout: TextureLayout | None = None
         self.artworkRetryCount = 0
         self.artworkReloadEnabled = self.settings.value(
             "preferences/autoReloadArtwork", False, bool
@@ -1322,8 +1325,11 @@ class AnimationEditor(AnimationSerialization):
         self.artworkReloadTimer.stop()
         self.artworkPath = None
         self.artworkDigest = None
+        self.nativeTextureLayout = None
         if self.sheet_format in (SheetFormat.SINGLE, SheetFormat.NATIVE) and self.sheet_image is not None:
             self.artworkPath = pathlib.Path(self.file_name).resolve().with_name(self.texture_name)
+            if self.sheet_format == SheetFormat.NATIVE:
+                self.nativeTextureLayout = read_texture_layout(self.file_name)
             self.artworkDigest = sha256(
                 self.sheet_image.get_data("RGBA", -self.sheet_image.width * 4)
             ).digest()
@@ -1340,7 +1346,15 @@ class AnimationEditor(AnimationSerialization):
         try:
             with Image.open(self.artworkPath) as source:
                 image = source.convert("RGBA")
+            if self.nativeTextureLayout is not None:
+                if self.nativeTextureLayout.frame_size != (self.frame_width, self.frame_height):
+                    raise FormatError("Frame dimensions changed. Reopen the sheet to load its new layout.")
+                image = unpack_texture(image, self.nativeTextureLayout)
             pixels = image.tobytes()
+        except FormatError as error:
+            self.ui.statusBar.showMessage(str(error), 5000)
+            self.updateArtworkWatch()
+            return
         except OSError:
             # Saves may briefly leave an incomplete or missing file.
             self.artworkRetryCount += 1

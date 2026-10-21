@@ -205,6 +205,20 @@ class EditorSmokeTest(unittest.TestCase):
                     self.assertIs(window.current_editor, editor)
                     self.assertEqual(document_data(editor._sprite_document(), "Sprite.png"), expected)
                     # JSON documents participate in normal undo and Save routing.
+                    action.setChecked(True)
+                    layout = editor.nativeTextureLayout
+                    self.assertIsNotNone(layout)
+                    index = next(i for i, region in enumerate(layout.regions) if region is not None)
+                    x, y, w, h, tx, ty = layout.regions[index]
+                    with Image.open(native_path.with_suffix(".png")) as source:
+                        packed = source.convert("RGBA")
+                    packed.putpixel((x, y), (10, 60, 90, 128))
+                    packed.save(native_path.with_suffix(".png"))
+                    editor.reloadChangedArtwork()
+                    self.assertEqual(editor._sprite_document().image_grid[index].getpixel((tx, ty)),
+                                     (10, 60, 90, 128))
+                    self.assertEqual(document_data(editor._sprite_document(), "Sprite.png"), expected)
+                    action.setChecked(False)
                     editor.ui.durationSpinBox.setValue(9)
                     self.assertTrue(editor.undoStack.canUndo())
                     editor.undoStack.undo()

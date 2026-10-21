@@ -19,6 +19,7 @@ from data import (
     SheetFormat,
 )
 from utils import FormatError
+from .packing import NativeRegion, TextureLayout, pack_texture, unpack_texture
 
 if TYPE_CHECKING:
     from conversion import SpriteDocument
@@ -97,7 +98,7 @@ class NativePooledAnimation(_RequiredPooledAnimation, total=False):
 NativeFrameRecord = list[int | bool]
 
 
-class NativeSpriteData(TypedDict):
+class NativeSpriteDataV2(TypedDict):
     """Version-two data usable immediately after json.loads, without expansion."""
 
     format: str
@@ -111,8 +112,15 @@ class NativeSpriteData(TypedDict):
     animations: dict[str, NativePooledAnimation]
 
 
+class NativeSpriteData(NativeSpriteDataV2):
+    """Version-three packed texture with unchanged direct-use timeline tables."""
+
+    grid_size: list[int]
+    regions: list[NativeRegion | None]
+
+
 FORMAT = "mdframeedit"
-VERSION = 2
+VERSION = 3
 FRAME_INDEX = 0
 DURATION = 1
 FLIP = 2
@@ -126,6 +134,7 @@ EVENT_NAMES: tuple[EventName, ...] = ("rush_frame", "hit_frame", "return_frame")
 OFFSET_NAMES: tuple[OffsetName, ...] = ("sprite_offset", "shadow_offset")
 ROOT_FIELDS = ("format", "version", "texture", "frame_size", "shadow_size", "action_points", "animations")
 POOLED_ROOT_FIELDS = (*ROOT_FIELDS, "frames", "sequences")
+PACKED_ROOT_FIELDS = (*POOLED_ROOT_FIELDS, "grid_size", "regions")
 
 
 def _object(
@@ -164,11 +173,11 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _header(value: object) -> dict[str, object]:
-    data = _object(value, POOLED_ROOT_FIELDS, ROOT_FIELDS, "Sprite")
-    if data["format"] != FORMAT or type(data["version"]) is not int or data["version"] not in (1, VERSION):
+    data = _object(value, PACKED_ROOT_FIELDS, ROOT_FIELDS, "Sprite")
+    if data["format"] != FORMAT or type(data["version"]) is not int or data["version"] not in (1, 2, VERSION):
         msg = "Unsupported sprite JSON format or version."
         raise FormatError(msg)
-    fields = ROOT_FIELDS if data["version"] == 1 else POOLED_ROOT_FIELDS
+    fields = {1: ROOT_FIELDS, 2: POOLED_ROOT_FIELDS, 3: PACKED_ROOT_FIELDS}[cast("int", data["version"])]
     _object(data, fields, fields, "Sprite")
     texture = data["texture"]
     if (not isinstance(texture, str) or not texture or texture in (".", "..")
@@ -179,12 +188,15 @@ def _header(value: object) -> dict[str, object]:
 
 
 def _validate_common(data: dict[str, object], image_size: tuple[int, int]) -> int:
-    """Validate texture geometry and attachment data shared by both versions."""
+    """Validate texture geometry and attachment data for all supported versions."""
     width, height = _pair(data["frame_size"], "frame_size", 1)
-    if image_size[0] % width or image_size[1] % height or min(image_size) <= 0:
-        msg = "Texture dimensions must be multiples of frame_size."
-        raise FormatError(msg)
-    count = image_size[0] // width * (image_size[1] // height)
+    if data["version"] == 3:
+        count = _validate_regions(data, image_size, (width, height))
+    else:
+        if image_size[0] % width or image_size[1] % height or min(image_size) <= 0:
+            msg = "Texture dimensions must be multiples of frame_size."
+            raise FormatError(msg)
+        count = image_size[0] // width * (image_size[1] // height)
     shadow = data["shadow_size"]
     if shadow is not None and (_integer(shadow, "shadow_size") not in (0, 1, 2)):
         msg = "Shadow Size must be null, 0, 1 or 2."
@@ -199,6 +211,28 @@ def _validate_common(data: dict[str, object], image_size: tuple[int, int]) -> in
             for point_name in POINT_NAMES:
                 _pair(point[point_name], point_name)
     return count
+
+
+def _validate_regions(data: dict[str, object], image_size: tuple[int, int], frame_size: tuple[int, int]) -> int:
+    columns, rows = _pair(data["grid_size"], "grid_size", 1)
+    regions = data["regions"]
+    if not isinstance(regions, list) or len(regions) != columns * rows:
+        raise FormatError("regions must contain one entry per logical cell in grid_size.")
+    if min(image_size) <= 0:
+        raise FormatError("Packed texture dimensions must be positive.")
+    for region in regions:
+        if region is None:
+            continue
+        if not isinstance(region, list) or len(region) != 6:
+            raise FormatError("A region must contain six integer fields or be null.")
+        x, y, width, height, tx, ty = [_integer(v, "Region", 0) for v in region]
+        if width == 0 or height == 0:
+            raise FormatError("Region width and height must be positive; use null for empty cells.")
+        if x + width > image_size[0] or y + height > image_size[1]:
+            raise FormatError("Region is outside the packed texture.")
+        if tx + width > frame_size[0] or ty + height > frame_size[1]:
+            raise FormatError("Region trim is outside the logical frame.")
+    return len(regions)
 
 
 def validate_data(data: object, image_size: tuple[int, int]) -> None:
@@ -351,7 +385,13 @@ def _offset_data(offset: Offset) -> list[int]:
 
 
 def document_data(document: SpriteDocument, texture: str) -> NativeSpriteData:
-    """Intern complete frame records and sequences for direct runtime consumption."""
+    """Build packed native data for validation or direct runtime consumption."""
+    _, layout = pack_texture(document.sheet_image, (document.frame_width, document.frame_height))
+    return _document_data(document, texture, layout)
+
+
+def _document_data(document: SpriteDocument, texture: str, layout: TextureLayout) -> NativeSpriteData:
+    """Intern complete frame records and sequences without modifying the model."""
     points: list[NativeActionPoints | None] = []
     for index in range(len(document.image_grid)):
         body = document.action_points.get(index)
@@ -417,21 +457,43 @@ def document_data(document: SpriteDocument, texture: str) -> NativeSpriteData:
         animations[group.name] = anim
     data: NativeSpriteData = {"format": FORMAT, "version": VERSION, "texture": texture,
             "frame_size": [document.frame_width, document.frame_height],
+            "grid_size": list(layout.grid_size), "regions": layout.regions,
             "shadow_size": document.shadow_size if document.shadow_size_present
             or document.shadow_size != document.loaded_shadow_size else None,
             "action_points": points, "frames": frame_records,
             "sequences": sequence_records, "animations": animations}
-    validate_data(data, document.sheet_image.size)
+    validate_data(data, layout.texture_size)
     return data
 
 
-def write_document(document: SpriteDocument, path: str | Path) -> None:
+def write_document(
+    document: SpriteDocument, path: str | Path, *, gutter: int = 1,
+    power_of_two: bool = False,
+) -> None:
     """Write a native JSON payload and its PNG into the staging directory."""
     path = Path(path)
     texture = path.with_suffix(".png").name
-    data = document_data(document, texture)
-    document.sheet_image.save(path.with_name(texture), format="PNG")
+    packed, layout = pack_texture(document.sheet_image, (document.frame_width, document.frame_height),
+                                  gutter=gutter, power_of_two=power_of_two)
+    data = _document_data(document, texture, layout)
+    packed.save(path.with_name(texture), format="PNG")
     path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
+def _texture_layout(data: NativeSpriteData, image_size: tuple[int, int]) -> TextureLayout:
+    return TextureLayout((data["frame_size"][0], data["frame_size"][1]),
+                         (data["grid_size"][0], data["grid_size"][1]), data["regions"], image_size)
+
+
+def read_texture_layout(path: str | Path) -> TextureLayout | None:
+    """Read the saved layout for external artwork reload; legacy PNGs are grids."""
+    path = Path(path)
+    header = _header(json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object))
+    if header["version"] != 3:
+        return None
+    with Image.open(path.with_name(cast("str", header["texture"]))) as image:
+        validate_data(header, image.size)
+        return _texture_layout(cast("NativeSpriteData", header), image.size)
 
 
 def load_document(path: str | Path, document_class: type[DocumentT]) -> DocumentT:
@@ -448,7 +510,9 @@ def load_document(path: str | Path, document_class: type[DocumentT]) -> Document
     with Image.open(path.with_name(texture)) as source:
         image = source.convert("RGBA")
     validate_data(raw_data, image.size)
-    data = cast("NativeSpriteDataV1 | NativeSpriteData", raw_data)
+    data = cast("NativeSpriteDataV1 | NativeSpriteDataV2 | NativeSpriteData", raw_data)
+    if data["version"] == 3:
+        image = unpack_texture(image, _texture_layout(cast("NativeSpriteData", data), image.size))
     document = document_class(image, data["frame_size"][0], data["frame_size"][1],
                               shadow_size=data["shadow_size"] if data["shadow_size"] is not None else 1,
                               loaded_shadow_size=data["shadow_size"] if data["shadow_size"] is not None else 1,
@@ -459,7 +523,7 @@ def load_document(path: str | Path, document_class: type[DocumentT]) -> Document
     if data["version"] == 1:
         _load_v1_animations(document, cast("NativeSpriteDataV1", data)["animations"])
     else:
-        _load_v2_animations(document, cast("NativeSpriteData", data))
+        _load_v2_animations(document, cast("NativeSpriteDataV2", data))
     document.loaded_action_points = copy.deepcopy(document.action_points)
     document.sheet_format = SheetFormat.NATIVE
     document.texture_name = texture
@@ -480,7 +544,7 @@ def _load_v1_animations(document: SpriteDocument, animations: list[NativeAnimati
                                          directions, copy_name=anim.get("copy_of", "")))
 
 
-def _load_v2_animations(document: SpriteDocument, data: NativeSpriteData) -> None:
+def _load_v2_animations(document: SpriteDocument, data: NativeSpriteDataV2) -> None:
     """Expand pooled storage into independent editor objects, never live aliases."""
     records = data["frames"]
     sequences = data["sequences"]

@@ -63,7 +63,7 @@ class FormatAdapterTest(unittest.TestCase):
         for path in direct.iterdir():
             self.assertEqual(path.read_bytes(), target.with_name(path.name).read_bytes())
         data = json.loads(target.read_bytes())
-        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["version"], 3)
         self.assertEqual(data["frames"], [[0, 4, False, 0, 0, 0, 0]])
         self.assertEqual(data["sequences"], [[0]])
 

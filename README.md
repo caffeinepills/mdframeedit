@@ -1,13 +1,17 @@
-Frame editor to edit FrameData.xml/AnimData.xml sheets and see results live instead of manually editing XML data and importing into your game.
+Sprite animation editor with a native JSON authoring format and FrameData.xml/AnimData.xml import and export.
 
 **Note:**
 For an easier time, use existing FrameData or AnimData to use and modify. Also make sure the FrameWidth, FrameHeight XML datas are accurate for the sheet you are using.
 
 # Controls
-* **Open / Ctrl+O** - Select one or several sprite XML files. Each sprite opens
+* **Open / Ctrl+O** - Select one or several sprite JSON or XML files. Each sprite opens
   in its own tab, named after its containing folder.
 * **Save / Save As / Export** - Apply to the active sprite tab. Each tab keeps
   its edits, selection, zoom, and shadow preview independently.
+  Save writes a native JSON document and a PNG texture with the same basename
+  (for example, `Sprite.json` and `Sprite.png`). The first Save after importing
+  XML asks where to save the native document; the source XML is untouched.
+  Use Export for either existing XML bundle format.
 * **Undo / Redo** - Available under Edit or standard keyboard shortcuts. (History works per tab)
 * **Copy / Paste Action Points** - Select a sprite sheet frame, then use Edit or
   right-click the frame list. Copies the head, center and both hands. Works between
@@ -33,7 +37,8 @@ For an easier time, use existing FrameData or AnimData to use and modify. Also m
 
 * **Lock Camera** - Stops following the sprite preview, allowing click drag to move the camera view around.
 
-* **Auto Reload Sheet** - If a change occurs to the Anim.png it will automatically update your frames. Only supported in single sheet mode.
+* **Auto Reload Sheet** - Reloads changes to the native document's PNG texture,
+  or `Anim.png` for an imported single-sheet XML document.
 
 # View
 
@@ -55,11 +60,47 @@ For an easier time, use existing FrameData or AnimData to use and modify. Also m
 
 # Save Options
 
+The following options control XML exports. Native JSON always retains authored
+sequences, shared-direction identity and action points without game-specific
+processing. See [the native format specification](JSON_FORMAT.md).
+
+Native version 3 crops and packs texture regions with logical trim offsets,
+alongside shared frame and sequence tables and animations keyed by name. Engines
+can use parsed JSON directly. The editor also reads versions 1 and 2 and upgrades
+them on Save. See the specification for region placement, frame-array field order
+and runtime access examples.
+
+Custom formats can implement the typed `SpriteFormat` adapter using the
+[format template and extension guide](formats/README.md). Native JSON and both
+Mystery Dungeon XML formats use the same bundle interface while retaining their
+own encoding and validation rules.
+
+Project builds read an editable [JSON profile](project.example.json) on every run:
+
+```powershell
+python cli.py build INPUT --profile project.example.json -o OUTPUT
+```
+
+Profiles control packing gutters, power-of-two textures, palette extraction,
+animation fallbacks, custom frame selections and optional rush movement
+compression. Builds write separate derived assets and leave authoring files
+unchanged. See [project profiles](PROJECT_PROFILES.md) for settings and examples.
+
 **Trim Copies**: Instead of writing full animation data, will instead write an Animation Action as CopyOf data. If your program doesn't handle this scenario, leave unchecked to write all frame data.
 
 **Collapse Singles**: If there is only one sequence that is the same for all 8 directions, it will save it as 1 sequence. If your program doesn't handle this scenario, leave unchecked to write all 8 sequences.
 
 # Running from source
+
+The CLI also reads and writes native documents:
+
+```shell
+mdframeedit-convert path/to/AnimData.xml --to native -o authoring/sprite
+mdframeedit-convert authoring/sprite/Sprite.json --to multi -o exports/sprite
+```
+
+`--to single` exports `FrameData.xml`; `--to multi` exports `AnimData.xml`.
+XML exports report incompatible data before replacing destination files.
 
 Use Python 3.10 or newer. From the project directory, activate your virtual
 environment and install the project and its dependencies:

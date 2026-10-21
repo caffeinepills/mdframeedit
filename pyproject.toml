@@ -16,7 +16,7 @@ dependencies = [
 gui = ["pyglet~=2.0.7", "PySide6~=6.9.1"]
 
 [tool.setuptools]
-py-modules = ["main", "data", "utils", "cli", "conversion", "action_alias"]
+py-modules = ["main", "data", "utils", "cli", "conversion", "action_alias", "project_build"]
 packages = ["gui", "formats"]
 
 [tool.setuptools.dynamic]

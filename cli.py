@@ -327,28 +327,40 @@ def main(argv=None):
 
 
 def build_main(argv: list[str]) -> int:
-    """Build one derived game sprite using an editable project profile."""
-    from project_build import build_sprite, load_profile
+    """Build sprites recursively using one editable project profile."""
+    from project_build import build_sprite, load_profile, plan_builds
     from utils import FormatError
 
     parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} build",
-        description="Build derived native JSON, packed PNG and palette from a sprite and JSON project profile.")
-    parser.add_argument("input", type=Path, help="source sprite JSON/XML file or sprite folder")
+        description="Build packed sprites from a source file or folder tree using one JSON project profile.")
+    parser.add_argument("input", type=Path, help="source sprite JSON/XML file or folder (searched recursively)")
     parser.add_argument("--profile", type=Path, required=True, help="editable project profile JSON")
-    parser.add_argument("-o", "--output", type=Path, required=True, help="separate build output folder")
+    parser.add_argument("-o", "--output", type=Path, required=True, help="destination folder (preserves relative sprite folders)")
     parser.add_argument("--overwrite", action="store_true", help="replace generated files in an existing output folder")
     args = parser.parse_args(argv)
     try:
-        # Protect the profile itself if someone points output at its directory.
+        profile = load_profile(args.profile)
+        jobs = plan_builds(args.input, args.output)
+        # Protect the shared profile at any generated sprite destination.
         managed = {"sprite.json", "sprite.png", "palette.json", "build.json"}
-        if args.profile.resolve().parent == args.output.resolve() and args.profile.name.casefold() in managed:
+        if (args.profile.name.casefold() in managed and
+            any(args.profile.resolve().parent == job.destination for job in jobs)):
             raise FormatError("Build output would overwrite the project profile.")
-        target = build_sprite(args.input, load_profile(args.profile), args.output, overwrite=args.overwrite)
     except (FormatError, OSError, ValueError, ET.ParseError) as error:
         print(f"Build failed: {error}", file=sys.stderr)
         return 1
-    print(f"Built {target}")
-    return 0
+    successes = failures = 0
+    for job in jobs:
+        try:
+            target = build_sprite(job.source, profile, job.destination, overwrite=args.overwrite)
+        except (FormatError, OSError, ValueError, ET.ParseError) as error:
+            failures += 1
+            print(f"FAILED {job.source}: {error}", file=sys.stderr, flush=True)
+        else:
+            successes += 1
+            print(f"OK {job.source} -> {target}", flush=True)
+    print(f"Built {successes}; failed {failures}.")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ from data import (
     SheetFormat,
 )
 from utils import FormatError
-from .packing import NativeRegion, TextureLayout, pack_texture, unpack_texture
+from .packing import NativeRegion, TextureLayout, grid_layout, pack_texture, unpack_texture
 
 if TYPE_CHECKING:
     from conversion import SpriteDocument
@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 DocumentT = TypeVar("DocumentT", bound="SpriteDocument")
 PointName = Literal["left_hand", "center", "right_hand", "head"]
 EventName = Literal["rush_frame", "hit_frame", "return_frame"]
-OffsetName = Literal["sprite_offset", "shadow_offset"]
 
 
 class NativeActionPoints(TypedDict):
@@ -37,46 +36,6 @@ class NativeActionPoints(TypedDict):
     center: list[int]
     right_hand: list[int]
     head: list[int]
-
-
-class _RequiredFrame(TypedDict):
-    frame: int
-    duration: int
-
-
-class NativeFrame(_RequiredFrame, total=False):
-    """Authored frame reference, timing and optional placement overrides."""
-
-    flip: bool
-    sprite_offset: list[int]
-    shadow_offset: list[int]
-
-
-class _RequiredAnimation(TypedDict):
-    name: str
-    directions: list[list[NativeFrame]]
-
-
-class NativeAnimation(_RequiredAnimation, total=False):
-    """Animation sequences with optional identity, events and copy hint."""
-
-    index: int
-    rush_frame: int
-    hit_frame: int
-    return_frame: int
-    copy_of: str
-
-
-class NativeSpriteDataV1(TypedDict):
-    """Validated version-one native JSON payload."""
-
-    format: str
-    version: int
-    texture: str
-    frame_size: list[int]
-    shadow_size: int | None
-    action_points: list[NativeActionPoints | None]
-    animations: list[NativeAnimation]
 
 
 class _RequiredPooledAnimation(TypedDict):
@@ -98,8 +57,8 @@ class NativePooledAnimation(_RequiredPooledAnimation, total=False):
 NativeFrameRecord = list[int | bool]
 
 
-class NativeSpriteDataV2(TypedDict):
-    """Version-two data usable immediately after json.loads, without expansion."""
+class NativeSpriteData(TypedDict):
+    """Native grid or packed data usable immediately after json.loads."""
 
     format: str
     version: int
@@ -110,11 +69,6 @@ class NativeSpriteDataV2(TypedDict):
     frames: list[NativeFrameRecord]
     sequences: list[list[int]]
     animations: dict[str, NativePooledAnimation]
-
-
-class NativeSpriteData(NativeSpriteDataV2):
-    """Version-three packed texture with unchanged direct-use timeline tables."""
-
     grid_size: list[int]
     regions: list[NativeRegion | None]
 
@@ -131,10 +85,8 @@ SHADOW_Y = 6
 FRAME_RECORD_LENGTH = 7
 POINT_NAMES: tuple[PointName, ...] = ("left_hand", "center", "right_hand", "head")
 EVENT_NAMES: tuple[EventName, ...] = ("rush_frame", "hit_frame", "return_frame")
-OFFSET_NAMES: tuple[OffsetName, ...] = ("sprite_offset", "shadow_offset")
-ROOT_FIELDS = ("format", "version", "texture", "frame_size", "shadow_size", "action_points", "animations")
-POOLED_ROOT_FIELDS = (*ROOT_FIELDS, "frames", "sequences")
-PACKED_ROOT_FIELDS = (*POOLED_ROOT_FIELDS, "grid_size", "regions")
+ROOT_FIELDS = ("format", "version", "texture", "frame_size", "shadow_size", "action_points",
+               "animations", "frames", "sequences", "grid_size", "regions")
 
 
 def _object(
@@ -173,12 +125,11 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _header(value: object) -> dict[str, object]:
-    data = _object(value, PACKED_ROOT_FIELDS, ROOT_FIELDS, "Sprite")
-    if data["format"] != FORMAT or type(data["version"]) is not int or data["version"] not in (1, 2, VERSION):
+    data = _object(value, ROOT_FIELDS, ("format", "version"), "Sprite")
+    if data["format"] != FORMAT or type(data["version"]) is not int or data["version"] != VERSION:
         msg = "Unsupported sprite JSON format or version."
         raise FormatError(msg)
-    fields = {1: ROOT_FIELDS, 2: POOLED_ROOT_FIELDS, 3: PACKED_ROOT_FIELDS}[cast("int", data["version"])]
-    _object(data, fields, fields, "Sprite")
+    _object(data, ROOT_FIELDS, ROOT_FIELDS, "Sprite")
     texture = data["texture"]
     if (not isinstance(texture, str) or not texture or texture in (".", "..")
             or any(c in texture for c in '/\\<>:"|?*') or Path(texture).suffix.lower() != ".png"):
@@ -188,15 +139,9 @@ def _header(value: object) -> dict[str, object]:
 
 
 def _validate_common(data: dict[str, object], image_size: tuple[int, int]) -> int:
-    """Validate texture geometry and attachment data for all supported versions."""
+    """Validate native texture geometry and attachment data."""
     width, height = _pair(data["frame_size"], "frame_size", 1)
-    if data["version"] == 3:
-        count = _validate_regions(data, image_size, (width, height))
-    else:
-        if image_size[0] % width or image_size[1] % height or min(image_size) <= 0:
-            msg = "Texture dimensions must be multiples of frame_size."
-            raise FormatError(msg)
-        count = image_size[0] // width * (image_size[1] // height)
+    count = _validate_regions(data, image_size, (width, height))
     shadow = data["shadow_size"]
     if shadow is not None and (_integer(shadow, "shadow_size") not in (0, 1, 2)):
         msg = "Shadow Size must be null, 0, 1 or 2."
@@ -239,66 +184,7 @@ def validate_data(data: object, image_size: tuple[int, int]) -> None:
     """Validate authoring input; engines can consume trusted JSON directly."""
     header = _header(data)
     count = _validate_common(header, image_size)
-    if header["version"] == 1:
-        _validate_v1_animations(header["animations"], count)
-    else:
-        _validate_v2_tables(header, count)
-
-
-def _validate_v1_animations(animations: object, count: int) -> None:
-    """Retain validation of the original inline animation schema."""
-    if not isinstance(animations, list) or not animations:
-        msg = "No animations found."
-        raise FormatError(msg)
-    names: set[str] = set()
-    indices: set[int] = set()
-    copies: dict[str, str] = {}
-    for anim_value in animations:
-        anim = _object(anim_value, ("name", "index", "rush_frame", "hit_frame", "return_frame", "directions", "copy_of"),
-                ("name", "directions"), "Animation")
-        name = anim["name"]
-        if not isinstance(name, str) or not name.strip() or name in names:
-            msg = "Missing or duplicate animation name."
-            raise FormatError(msg)
-        names.add(name)
-        if "index" in anim:
-            index = _integer(anim["index"], f"{name}: index", 0)
-            if index in indices:
-                msg = f"Duplicate animation index: {index}."
-                raise FormatError(msg)
-            indices.add(index)
-        directions = anim["directions"]
-        if not isinstance(directions, list) or len(directions) not in (1, 8):
-            msg = f"{name}: expected one shared direction or eight directions."
-            raise FormatError(msg)
-        events = [_integer(anim.get(k, -1), f"{name}: {k}", -1)
-                  for k in EVENT_NAMES]
-        for sequence in directions:
-            if not isinstance(sequence, list):
-                msg = f"{name}: expected a frame list."
-                raise FormatError(msg)
-            if sequence and any(event >= len(sequence) for event in events):
-                msg = f"{name}: event frame is outside a sequence."
-                raise FormatError(msg)
-            for frame_value in sequence:
-                frame = _object(frame_value, ("frame", "duration", "flip", "sprite_offset", "shadow_offset"),
-                        ("frame", "duration"), f"{name}: frame")
-                if _integer(frame["frame"], f"{name}: frame", 0) >= count:
-                    msg = f"{name}: frame reference is outside the atlas."
-                    raise FormatError(msg)
-                _integer(frame["duration"], f"{name}: duration", 1)
-                if type(frame.get("flip", False)) is not bool:
-                    msg = f"{name}: flip must be a boolean."
-                    raise FormatError(msg)
-                for key in OFFSET_NAMES:
-                    _pair(frame.get(key, [0, 0]), f"{name}: {key}")
-        if "copy_of" in anim:
-            target_name = anim["copy_of"]
-            if not isinstance(target_name, str):
-                msg = f"{name}: invalid copy_of."
-                raise FormatError(msg)
-            copies[name] = target_name
-    _validate_copy_targets(copies, names)
+    _validate_tables(header, count)
 
 
 def _validate_copy_targets(copies: dict[str, str], names: set[str]) -> None:
@@ -322,7 +208,7 @@ def _reference(value: object, count: int, location: str) -> int:
     return index
 
 
-def _validate_v2_tables(data: dict[str, object], cell_count: int) -> None:
+def _validate_tables(data: dict[str, object], cell_count: int) -> None:
     """Check each pooled record once and validate all animation references."""
     frames = data["frames"]
     sequences = data["sequences"]
@@ -385,8 +271,8 @@ def _offset_data(offset: Offset) -> list[int]:
 
 
 def document_data(document: SpriteDocument, texture: str) -> NativeSpriteData:
-    """Build packed native data for validation or direct runtime consumption."""
-    _, layout = pack_texture(document.sheet_image, (document.frame_width, document.frame_height))
+    """Build native authoring data with stable, full-cell texture regions."""
+    layout = grid_layout(document.sheet_image, (document.frame_width, document.frame_height))
     return _document_data(document, texture, layout)
 
 
@@ -466,17 +352,28 @@ def _document_data(document: SpriteDocument, texture: str, layout: TextureLayout
     return data
 
 
-def write_document(
-    document: SpriteDocument, path: str | Path, *, gutter: int = 1,
+def write_document(document: SpriteDocument, path: str | Path) -> None:
+    """Write authoring JSON and an unchanged, externally editable grid PNG."""
+    layout = grid_layout(document.sheet_image, (document.frame_width, document.frame_height))
+    _write_document(document, Path(path), document.sheet_image, layout)
+
+
+def write_packed_document(
+    document: SpriteDocument, path: str | Path, *, padding: int = 1,
     power_of_two: bool = False,
 ) -> None:
-    """Write a native JSON payload and its PNG into the staging directory."""
+    """Write cropped, padded texture regions for a derived project build."""
+    packed, layout = pack_texture(document.sheet_image, (document.frame_width, document.frame_height),
+                                  padding=padding, power_of_two=power_of_two)
+    _write_document(document, Path(path), packed, layout)
+
+
+def _write_document(document: SpriteDocument, path: Path, image: Image.Image, layout: TextureLayout) -> None:
+    """Serialize either texture layout using the same direct-use native schema."""
     path = Path(path)
     texture = path.with_suffix(".png").name
-    packed, layout = pack_texture(document.sheet_image, (document.frame_width, document.frame_height),
-                                  gutter=gutter, power_of_two=power_of_two)
     data = _document_data(document, texture, layout)
-    packed.save(path.with_name(texture), format="PNG")
+    image.save(path.with_name(texture), format="PNG")
     path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
@@ -485,12 +382,10 @@ def _texture_layout(data: NativeSpriteData, image_size: tuple[int, int]) -> Text
                          (data["grid_size"][0], data["grid_size"][1]), data["regions"], image_size)
 
 
-def read_texture_layout(path: str | Path) -> TextureLayout | None:
-    """Read the saved layout for external artwork reload; legacy PNGs are grids."""
+def read_texture_layout(path: str | Path) -> TextureLayout:
+    """Read the saved native layout for external artwork reload."""
     path = Path(path)
     header = _header(json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object))
-    if header["version"] != 3:
-        return None
     with Image.open(path.with_name(cast("str", header["texture"]))) as image:
         validate_data(header, image.size)
         return _texture_layout(cast("NativeSpriteData", header), image.size)
@@ -510,9 +405,8 @@ def load_document(path: str | Path, document_class: type[DocumentT]) -> Document
     with Image.open(path.with_name(texture)) as source:
         image = source.convert("RGBA")
     validate_data(raw_data, image.size)
-    data = cast("NativeSpriteDataV1 | NativeSpriteDataV2 | NativeSpriteData", raw_data)
-    if data["version"] == 3:
-        image = unpack_texture(image, _texture_layout(cast("NativeSpriteData", data), image.size))
+    data = cast("NativeSpriteData", raw_data)
+    image = unpack_texture(image, _texture_layout(data, image.size))
     document = document_class(image, data["frame_size"][0], data["frame_size"][1],
                               shadow_size=data["shadow_size"] if data["shadow_size"] is not None else 1,
                               loaded_shadow_size=data["shadow_size"] if data["shadow_size"] is not None else 1,
@@ -520,31 +414,14 @@ def load_document(path: str | Path, document_class: type[DocumentT]) -> Document
     for index, points in enumerate(data["action_points"]):
         if points is not None:
             document.action_points[index] = ActionPoints(**{name: Offset(*points[name]) for name in POINT_NAMES})
-    if data["version"] == 1:
-        _load_v1_animations(document, cast("NativeSpriteDataV1", data)["animations"])
-    else:
-        _load_v2_animations(document, cast("NativeSpriteDataV2", data))
+    _load_animations(document, data)
     document.loaded_action_points = copy.deepcopy(document.action_points)
     document.sheet_format = SheetFormat.NATIVE
     document.texture_name = texture
     return document
 
 
-def _load_v1_animations(document: SpriteDocument, animations: list[NativeAnimation]) -> None:
-    for anim in animations:
-        directions: list[AnimationSequence] = []
-        for sequence in anim["directions"]:
-            directions.append(AnimationSequence([
-                AnimFrame(index, frame["frame"], int(frame.get("flip", False)), frame["duration"],
-                          Offset(*frame.get("shadow_offset", [0, 0])), Offset(*frame.get("sprite_offset", [0, 0])))
-                for index, frame in enumerate(sequence)
-            ]))
-        document.groups.append(AnimGroup(anim.get("index", -1), anim["name"],
-                                         anim.get("rush_frame", -1), anim.get("hit_frame", -1), anim.get("return_frame", -1),
-                                         directions, copy_name=anim.get("copy_of", "")))
-
-
-def _load_v2_animations(document: SpriteDocument, data: NativeSpriteDataV2) -> None:
+def _load_animations(document: SpriteDocument, data: NativeSpriteData) -> None:
     """Expand pooled storage into independent editor objects, never live aliases."""
     records = data["frames"]
     sequences = data["sequences"]

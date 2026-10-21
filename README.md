@@ -64,12 +64,6 @@ The following options control XML exports. Native JSON always retains authored
 sequences, shared-direction identity and action points without game-specific
 processing. See [the native format specification](JSON_FORMAT.md).
 
-Native version 3 crops and packs texture regions with logical trim offsets,
-alongside shared frame and sequence tables and animations keyed by name. Engines
-can use parsed JSON directly. The editor also reads versions 1 and 2 and upgrades
-them on Save. See the specification for region placement, frame-array field order
-and runtime access examples.
-
 Custom formats can implement the typed `SpriteFormat` adapter using the
 [format template and extension guide](formats/README.md). Native JSON and both
 Mystery Dungeon XML formats use the same bundle interface while retaining their
@@ -81,10 +75,12 @@ Project builds read an editable [JSON profile](project.example.json) on every ru
 python cli.py build INPUT --profile project.example.json -o OUTPUT
 ```
 
-Profiles control packing gutters, power-of-two textures, palette extraction,
+Profiles control texture padding, power-of-two textures, palette extraction,
 animation fallbacks, custom frame selections and optional rush movement
 compression. Builds write separate derived assets and leave authoring files
 unchanged. See [project profiles](PROJECT_PROFILES.md) for settings and examples.
+Folder inputs are searched recursively; output keeps their relative sprite
+folders. One global profile controls the whole batch. Use `--overwrite` to rebuild.
 
 **Trim Copies**: Instead of writing full animation data, will instead write an Animation Action as CopyOf data. If your program doesn't handle this scenario, leave unchecked to write all frame data.
 

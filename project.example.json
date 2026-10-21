@@ -2,7 +2,7 @@
   "format": "mdframeedit-project",
   "version": 1,
   "packing": {
-    "gutter": 1,
+    "padding": 1,
     "power_of_two": false
   },
   "palette": {

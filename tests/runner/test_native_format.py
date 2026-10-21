@@ -19,7 +19,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from conversion import SpriteDocument
 from data import ActionPoints, AnimationSequence, AnimFrame, AnimGroup, Offset, SheetFormat
-from formats.native import DURATION, FLIP, FRAME_INDEX, document_data, read_texture_layout
+from formats.native import DURATION, FLIP, FRAME_INDEX, document_data, read_texture_layout, write_packed_document
 from formats.packing import pack_texture, unpack_texture
 from utils import FormatError
 
@@ -50,11 +50,18 @@ class NativeFormatTest(unittest.TestCase):
     def save(self, document=None, name="Sprite.json"):
         return (document or self.document).export(self.root / "native", SheetFormat.NATIVE, name)
 
+    def save_packed(self, document=None):
+        path = self.root / "packed" / "Sprite.json"
+        path.parent.mkdir(exist_ok=True)
+        write_packed_document(document or self.document, path)
+        return path
+
     def assert_document_equal(self, before, after):
         self.assertEqual(document_data(before, "Sprite.png"), document_data(after, "Sprite.png"))
         self.assertEqual(before.sheet_image.tobytes(), after.sheet_image.tobytes())
 
     def test_native_roundtrip_preserves_pixels_metadata_and_shared_directions(self):
+        self.document.sheet_image.putpixel((0, 7), (12, 34, 56, 0))
         target = self.save(name="Chosen.json")
         self.assertEqual({p.name for p in target.parent.iterdir()}, {"Chosen.json", "Chosen.png"})
         loaded = SpriteDocument.load(target)
@@ -63,6 +70,10 @@ class NativeFormatTest(unittest.TestCase):
         self.assertEqual(loaded.sheet_format, SheetFormat.NATIVE)
         self.assertIsNone(loaded.action_pt_image)
         self.assertEqual(loaded.texture_name, "Chosen.png")
+        with Image.open(target.with_suffix(".png")) as image:
+            self.assertEqual(image.size, self.document.sheet_image.size)
+            self.assertEqual(image.tobytes(), self.document.sheet_image.tobytes())
+        self.assertEqual(json.loads(target.read_bytes())["regions"], [[0, 0, 6, 8, 0, 0], [6, 0, 6, 8, 0, 0]])
         # Repeated saves are deterministic and ignore XML compression settings.
         original = target.read_bytes()
         loaded.trim_copies = loaded.collapse_singles = False
@@ -219,50 +230,6 @@ class NativeFormatTest(unittest.TestCase):
         self.assertEqual(group.directions[0].frames[2].idx, 2)
         self.assert_document_equal(loaded, SpriteDocument.load(self.save(loaded)))
 
-    def test_version_one_reads_and_upgrades_only_when_saved(self):
-        target = self.save()
-        legacy = {
-            "format": "mdframeedit", "version": 1, "texture": "Sprite.png",
-            "frame_size": [6, 8], "shadow_size": None,
-            "action_points": [None, None],
-            "animations": [{"name": "Legacy", "directions": [[
-                {"frame": 1, "duration": 5, "flip": True,
-                 "sprite_offset": [-3, 2], "shadow_offset": [4, -1]},
-            ]]}],
-        }
-        target.write_text(json.dumps(legacy), encoding="utf-8")
-        self.document.sheet_image.save(target.with_suffix(".png"))
-        before = target.read_bytes()
-        loaded = SpriteDocument.load(target)
-        self.assertEqual(target.read_bytes(), before)
-        self.assertTrue(loaded.groups[0].is_single_direction)
-        self.assertEqual(loaded.groups[0].directions[0].frames[0].sprite_offset, Offset(-3, 2))
-        self.assertFalse(loaded.shadow_size_present)
-        self.save(loaded)
-        self.assertEqual(json.loads(target.read_bytes())["version"], 3)
-        self.assert_document_equal(loaded, SpriteDocument.load(target))
-        legacy["animations"][0]["directions"][0][0]["duration"] = False
-        target.write_text(json.dumps(legacy), encoding="utf-8")
-        self.document.sheet_image.save(target.with_suffix(".png"))
-        with self.assertRaisesRegex(FormatError, "integer"):
-            SpriteDocument.load(target)
-
-    def test_version_two_grid_is_read_without_rewriting_and_upgrades_on_save(self):
-        target = self.save()
-        legacy = document_data(self.document, "Sprite.png")
-        legacy["version"] = 2
-        del legacy["grid_size"], legacy["regions"]
-        target.write_text(json.dumps(legacy), encoding="utf-8")
-        self.document.sheet_image.save(target.with_suffix(".png"))
-        before = target.read_bytes()
-        loaded = SpriteDocument.load(target)
-        self.assertEqual(target.read_bytes(), before)
-        self.assertIsNone(read_texture_layout(target))
-        self.assert_document_equal(self.document, loaded)
-        self.save(loaded)
-        self.assertEqual(json.loads(target.read_bytes())["version"], 3)
-        self.assert_document_equal(loaded, SpriteDocument.load(target))
-
     def test_packed_regions_preserve_world_pixels_for_even_and_odd_flipped_frames(self):
         for width, height in ((6, 8), (7, 9)):
             image = Image.new("RGBA", (width * 2, height * 2))
@@ -273,7 +240,7 @@ class NativeFormatTest(unittest.TestCase):
                 AnimationSequence([AnimFrame(frame_index=0, duration=3, flip=flip,
                     sprite_offset=Offset(-3, 5)) for flip in (0, 1)])
             ])], action_points={2: ActionPoints(Offset(-8, 12), Offset(), Offset(), Offset())})
-            target = self.save(document)
+            target = self.save_packed(document)
             data = json.loads(target.read_bytes())
             with Image.open(target.with_suffix(".png")) as source:
                 packed = source.convert("RGBA")
@@ -307,12 +274,30 @@ class NativeFormatTest(unittest.TestCase):
         self.document.action_points.clear()
         target = self.save()
         data = json.loads(target.read_bytes())
-        self.assertEqual(data["regions"], [None, None])
-        with Image.open(target.with_suffix(".png")) as packed:
-            self.assertEqual(packed.size, (1, 1))
+        self.assertEqual(data["regions"], [[0, 0, 6, 8, 0, 0], [6, 0, 6, 8, 0, 0]])
+        with Image.open(target.with_suffix(".png")) as image:
+            self.assertEqual(image.size, (12, 8))
         self.assert_document_equal(self.document, SpriteDocument.load(target))
+        packed_target = self.save_packed()
+        self.assertEqual(json.loads(packed_target.read_bytes())["regions"], [None, None])
+        with Image.open(packed_target.with_suffix(".png")) as image:
+            self.assertEqual(image.size, (1, 1))
+        self.assert_document_equal(self.document, SpriteDocument.load(packed_target))
 
-    def test_each_crop_has_a_transparent_gutter_including_fallback_and_texture_edges(self):
+    def test_packed_input_saves_as_editable_grid_and_accepts_new_artwork_in_margins(self):
+        packed = SpriteDocument.load(self.save_packed())
+        target = self.save(packed)
+        with Image.open(target.with_suffix(".png")) as source:
+            image = source.convert("RGBA")
+        self.assertEqual(image.size, (12, 8))
+        image.putpixel((0, 7), (20, 60, 100, 128))
+        image.save(target.with_suffix(".png"))
+        loaded = SpriteDocument.load(target)
+        self.assertEqual(loaded.image_grid[0].getpixel((0, 7)), (20, 60, 100, 128))
+        self.assertEqual(loaded.groups, packed.groups)
+        self.assertEqual(loaded.action_points, packed.action_points)
+
+    def test_each_crop_has_a_transparent_padding_including_fallback_and_texture_edges(self):
         image = Image.new("RGBA", (12, 10))
         for index in range(6):
             left, top = index % 3 * 4, index // 3 * 5
@@ -341,7 +326,7 @@ class NativeFormatTest(unittest.TestCase):
                         self.assertEqual(packed.getpixel((x + w, py)), (0, 0, 0, 0))
 
     def test_packed_artwork_reload_uses_saved_regions_and_rejects_layout_changes(self):
-        target = self.save()
+        target = self.save_packed()
         layout = read_texture_layout(target)
         self.assertIsNotNone(layout)
         with Image.open(target.with_suffix(".png")) as source:

@@ -13,13 +13,13 @@ from conversion import SpriteDocument
 from data import AnimGroup, Offset
 from formats import NativeFormat
 from formats.base import DocumentT
-from formats.native import write_document
+from formats.native import write_packed_document
 from utils import FormatError
 
 
 @dataclass(frozen=True)
 class PackingSettings:
-    gutter: int = 1
+    padding: int = 1
     power_of_two: bool = False
 
 
@@ -56,6 +56,52 @@ class ProjectProfile:
     packing: PackingSettings = field(default_factory=PackingSettings)
     palette: PaletteSettings = field(default_factory=PaletteSettings)
     animations: AnimationSettings = field(default_factory=AnimationSettings)
+
+
+@dataclass(frozen=True)
+class BuildJob:
+    source: Path
+    destination: Path
+
+
+def plan_builds(source: str | Path, destination: str | Path) -> list[BuildJob]:
+    """Discover one preferred source per sprite folder and preserve its relative path."""
+    source, destination = Path(source).resolve(), Path(destination).resolve()
+    if not source.exists():
+        raise FormatError(f"Build source does not exist: {source}")
+    root = source.parent if source.is_file() else source
+    if destination == root or destination in root.parents or root in destination.parents:
+        raise FormatError("Build output must be separate from the source sprite folder.")
+    if destination.exists() and not destination.is_dir():
+        raise FormatError("Build output must be a folder.")
+    if source.is_file():
+        if source.suffix.lower() not in (".json", ".xml"):
+            raise FormatError("Build source must be a sprite JSON/XML file or folder.")
+        return [BuildJob(source, destination)]
+    priority = {"sprite.json": 0, "framedata.xml": 1, "animdata.xml": 2}
+    preferred: dict[Path, Path] = {}
+    for path in source.rglob("*"):
+        if path.name.casefold() not in priority or path.is_symlink() or not path.is_file():
+            continue
+        previous = preferred.get(path.parent)
+        if previous is None or priority[path.name.casefold()] < priority[previous.name.casefold()]:
+            preferred[path.parent] = path
+        elif path.name.casefold() == previous.name.casefold():
+            raise FormatError(f"Ambiguous sprite sources in {path.parent}: {previous.name}, {path.name}.")
+    if not preferred:
+        raise FormatError("No Sprite.json, FrameData.xml or AnimData.xml files found in the source tree.")
+    jobs: list[BuildJob] = []
+    destinations: set[str] = set()
+    for folder in sorted(preferred, key=lambda path: (len(path.parts), str(path).casefold())):
+        target = (destination / folder.relative_to(root)).resolve()
+        if not target.is_relative_to(destination):
+            raise FormatError(f"Build destination escapes the output folder: {target}")
+        key = str(target).casefold()
+        if key in destinations:
+            raise FormatError(f"Multiple sprites would write to the same destination: {target}")
+        destinations.add(key)
+        jobs.append(BuildJob(preferred[folder], target))
+    return jobs
 
 
 def _object(value: object, fields: tuple[str, ...], where: str) -> dict[str, object]:
@@ -102,7 +148,7 @@ def profile_from_data(value: object) -> ProjectProfile:
     data = _object(value, ("format", "version", "packing", "palette", "animations"), "Project profile")
     if data.get("format") != "mdframeedit-project" or type(data.get("version")) is not int or data["version"] != 1:
         raise FormatError("Unsupported project profile format or version.")
-    packing = _object(data.get("packing", {}), ("gutter", "power_of_two"), "packing")
+    packing = _object(data.get("packing", {}), ("padding", "power_of_two"), "packing")
     palette = _object(data.get("palette", {}), ("enabled", "include_transparent"), "palette")
     anim = _object(data.get("animations", {}), ("fallbacks", "custom", "rush"), "animations")
     rush = _object(anim.get("rush", {}), ("enabled", "divisor", "actions"), "animations.rush")
@@ -134,7 +180,7 @@ def profile_from_data(value: object) -> ProjectProfile:
     if fallback_rules.keys() & custom_rules.keys():
         raise FormatError("An animation cannot have both a custom definition and a fallback rule.")
     return ProjectProfile(
-        PackingSettings(_int(packing.get("gutter", 1), 1, "packing.gutter"),
+        PackingSettings(_int(packing.get("padding", 1), 1, "packing.padding"),
                         _bool(packing.get("power_of_two", False), "packing.power_of_two")),
         PaletteSettings(_bool(palette.get("enabled", True), "palette.enabled"),
                         _bool(palette.get("include_transparent", False), "palette.include_transparent")),
@@ -230,7 +276,7 @@ def apply_profile(document: SpriteDocument, profile: ProjectProfile) -> SpriteDo
 
 
 def palette_data(document: SpriteDocument, include_transparent: bool) -> dict[str, object]:
-    """Extract deterministic exact RGBA colors from logical artwork, excluding gutters."""
+    """Extract deterministic exact RGBA colors from logical artwork, excluding padding."""
     counts: Counter[tuple[int, int, int, int]] = Counter(document.sheet_image.get_flattened_data())
     colors = sorted(color for color in counts if include_transparent or color[3] != 0)
     return {"format": "mdframeedit-palette", "version": 1,
@@ -244,7 +290,7 @@ class ProjectBuildFormat(NativeFormat):
         self.profile = profile
 
     def write(self, document: SpriteDocument, directory: Path, filename: str) -> None:
-        write_document(document, directory / filename, gutter=self.profile.packing.gutter,
+        write_packed_document(document, directory / filename, padding=self.profile.packing.padding,
                        power_of_two=self.profile.packing.power_of_two)
         if self.profile.palette.enabled:
             (directory / "Palette.json").write_text(
@@ -272,7 +318,8 @@ def build_sprite(source: str | Path, profile: ProjectProfile, destination: str |
         raise FormatError("Choose a sprite JSON/XML file or a folder containing Sprite.json, FrameData.xml or AnimData.xml.")
     if destination == source.parent or destination in source.parents or source.parent in destination.parents:
         raise FormatError("Build output must be separate from the source sprite folder.")
-    if destination.exists() and (not destination.is_dir() or (not overwrite and any(destination.iterdir()))):
+    if destination.exists() and (not destination.is_dir() or
+        (not overwrite and any(not path.is_dir() for path in destination.iterdir()))):
         raise FormatError("Build output already contains files; use --overwrite to replace generated assets.")
     document = apply_profile(SpriteDocument.load(source), profile)
     return document.export(destination, ProjectBuildFormat(profile))

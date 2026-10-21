@@ -68,15 +68,19 @@ def plan_builds(source: str | Path, destination: str | Path) -> list[BuildJob]:
     """Discover one preferred source per sprite folder and preserve its relative path."""
     source, destination = Path(source).resolve(), Path(destination).resolve()
     if not source.exists():
-        raise FormatError(f"Build source does not exist: {source}")
+        msg = f"Build source does not exist: {source}"
+        raise FormatError(msg)
     root = source.parent if source.is_file() else source
     if destination == root or destination in root.parents or root in destination.parents:
-        raise FormatError("Build output must be separate from the source sprite folder.")
+        msg = "Build output must be separate from the source sprite folder."
+        raise FormatError(msg)
     if destination.exists() and not destination.is_dir():
-        raise FormatError("Build output must be a folder.")
+        msg = "Build output must be a folder."
+        raise FormatError(msg)
     if source.is_file():
         if source.suffix.lower() not in (".json", ".xml"):
-            raise FormatError("Build source must be a sprite JSON/XML file or folder.")
+            msg = "Build source must be a sprite JSON/XML file or folder."
+            raise FormatError(msg)
         return [BuildJob(source, destination)]
     priority = {"sprite.json": 0, "framedata.xml": 1, "animdata.xml": 2}
     preferred: dict[Path, Path] = {}
@@ -87,18 +91,22 @@ def plan_builds(source: str | Path, destination: str | Path) -> list[BuildJob]:
         if previous is None or priority[path.name.casefold()] < priority[previous.name.casefold()]:
             preferred[path.parent] = path
         elif path.name.casefold() == previous.name.casefold():
-            raise FormatError(f"Ambiguous sprite sources in {path.parent}: {previous.name}, {path.name}.")
+            msg = f"Ambiguous sprite sources in {path.parent}: {previous.name}, {path.name}."
+            raise FormatError(msg)
     if not preferred:
-        raise FormatError("No Sprite.json, FrameData.xml or AnimData.xml files found in the source tree.")
+        msg = "No Sprite.json, FrameData.xml or AnimData.xml files found in the source tree."
+        raise FormatError(msg)
     jobs: list[BuildJob] = []
     destinations: set[str] = set()
     for folder in sorted(preferred, key=lambda path: (len(path.parts), str(path).casefold())):
         target = (destination / folder.relative_to(root)).resolve()
         if not target.is_relative_to(destination):
-            raise FormatError(f"Build destination escapes the output folder: {target}")
+            msg = f"Build destination escapes the output folder: {target}"
+            raise FormatError(msg)
         key = str(target).casefold()
         if key in destinations:
-            raise FormatError(f"Multiple sprites would write to the same destination: {target}")
+            msg = f"Multiple sprites would write to the same destination: {target}"
+            raise FormatError(msg)
         destinations.add(key)
         jobs.append(BuildJob(preferred[folder], target))
     return jobs
@@ -106,31 +114,36 @@ def plan_builds(source: str | Path, destination: str | Path) -> list[BuildJob]:
 
 def _object(value: object, fields: tuple[str, ...], where: str) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) - set(fields):
-        raise FormatError(f"{where}: expected an object with only {', '.join(fields)}.")
+        msg = f"{where}: expected an object with only {', '.join(fields)}."
+        raise FormatError(msg)
     return cast("dict[str, object]", value)
 
 
 def _int(value: object, minimum: int, where: str) -> int:
     if type(value) is not int or value < minimum:
-        raise FormatError(f"{where}: expected an integer >= {minimum}.")
+        msg = f"{where}: expected an integer >= {minimum}."
+        raise FormatError(msg)
     return value
 
 
 def _bool(value: object, where: str) -> bool:
     if type(value) is not bool:
-        raise FormatError(f"{where}: expected a boolean.")
+        msg = f"{where}: expected a boolean."
+        raise FormatError(msg)
     return value
 
 
 def _name(value: object, where: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise FormatError(f"{where}: expected a nonblank animation name.")
+        msg = f"{where}: expected a nonblank animation name."
+        raise FormatError(msg)
     return value
 
 
 def _names(value: object, where: str) -> tuple[str, ...]:
     if not isinstance(value, list):
-        raise FormatError(f"{where}: expected a list of animation names.")
+        msg = f"{where}: expected a list of animation names."
+        raise FormatError(msg)
     return tuple(_name(item, where) for item in value)
 
 
@@ -138,7 +151,8 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
-            raise FormatError(f"Duplicate project profile field: {key!r}.")
+            msg = f"Duplicate project profile field: {key!r}."
+            raise FormatError(msg)
         result[key] = value
     return result
 
@@ -147,7 +161,8 @@ def profile_from_data(value: object) -> ProjectProfile:
     """Validate profile settings once, before loading artwork or writing outputs."""
     data = _object(value, ("format", "version", "packing", "palette", "animations"), "Project profile")
     if data.get("format") != "mdframeedit-project" or type(data.get("version")) is not int or data["version"] != 1:
-        raise FormatError("Unsupported project profile format or version.")
+        msg = "Unsupported project profile format or version."
+        raise FormatError(msg)
     packing = _object(data.get("packing", {}), ("padding", "power_of_two"), "packing")
     palette = _object(data.get("palette", {}), ("enabled", "include_transparent"), "palette")
     anim = _object(data.get("animations", {}), ("fallbacks", "custom", "rush"), "animations")
@@ -155,13 +170,15 @@ def profile_from_data(value: object) -> ProjectProfile:
     fallbacks = anim.get("fallbacks", {})
     custom = anim.get("custom", {})
     if not isinstance(fallbacks, dict) or not isinstance(custom, dict):
-        raise FormatError("animations.fallbacks and animations.custom must be objects keyed by animation name.")
+        msg = "animations.fallbacks and animations.custom must be objects keyed by animation name."
+        raise FormatError(msg)
     fallback_rules: dict[str, tuple[str, ...]] = {}
     for name, choices in fallbacks.items():
         name = _name(name, "Fallback name")
         fallback_rules[name] = _names(choices, name)
         if not fallback_rules[name]:
-            raise FormatError(f"{name}: provide at least one fallback.")
+            msg = f"{name}: provide at least one fallback."
+            raise FormatError(msg)
     custom_rules: dict[str, CustomAnimation] = {}
     for name, rule in custom.items():
         name = _name(name, "Custom animation name")
@@ -170,7 +187,8 @@ def profile_from_data(value: object) -> ProjectProfile:
         if "frames" in definition:
             selection = definition["frames"]
             if not isinstance(selection, list) or not selection:
-                raise FormatError(f"{name}: frames must be a nonempty list of timeline positions.")
+                msg = f"{name}: frames must be a nonempty list of timeline positions."
+                raise FormatError(msg)
             frames = tuple(_int(i, 0, f"{name}: frames") for i in selection)
         custom_rules[name] = CustomAnimation(
             _name(definition.get("source"), f"{name}: source"), frames,
@@ -178,7 +196,8 @@ def profile_from_data(value: object) -> ProjectProfile:
             _int(definition["index"], 0, f"{name}: index") if "index" in definition else None,
         )
     if fallback_rules.keys() & custom_rules.keys():
-        raise FormatError("An animation cannot have both a custom definition and a fallback rule.")
+        msg = "An animation cannot have both a custom definition and a fallback rule."
+        raise FormatError(msg)
     return ProjectProfile(
         PackingSettings(_int(packing.get("padding", 1), 1, "packing.padding"),
                         _bool(packing.get("power_of_two", False), "packing.power_of_two")),
@@ -196,7 +215,8 @@ def load_profile(path: str | Path) -> ProjectProfile:
     try:
         return profile_from_data(json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=_unique_object))
     except (ValueError, UnicodeError) as error:
-        raise FormatError(f"Invalid project profile JSON: {error}") from error
+        msg = f"Invalid project profile JSON: {error}"
+        raise FormatError(msg) from error
 
 
 def apply_profile(document: SpriteDocument, profile: ProjectProfile) -> SpriteDocument:
@@ -211,7 +231,8 @@ def apply_profile(document: SpriteDocument, profile: ProjectProfile) -> SpriteDo
         if name in resolved:
             return resolved[name]
         if name in visiting:
-            raise FormatError(f"Cyclic animation rules involving {name!r}.")
+            msg = f"Cyclic animation rules involving {name!r}."
+            raise FormatError(msg)
         if name not in rules.custom and name in originals:
             resolved[name] = originals[name]
             return originals[name]
@@ -227,7 +248,8 @@ def apply_profile(document: SpriteDocument, profile: ProjectProfile) -> SpriteDo
                 frames = sequence.frames
                 if rule.frames is not None:
                     if any(index >= len(frames) for index in rule.frames):
-                        raise FormatError(f"{name}: selected frame is outside a source direction.")
+                        msg = f"{name}: selected frame is outside a source direction."
+                        raise FormatError(msg)
                     sequence.frames = [copy.deepcopy(frames[index]) for index in rule.frames]
                 for index, frame in enumerate(sequence.frames):
                     frame.idx = index
@@ -244,9 +266,11 @@ def apply_profile(document: SpriteDocument, profile: ProjectProfile) -> SpriteDo
                     group.name, group.idx, group.copy_name = name, -1, ""
                     break
             else:
-                raise FormatError(f"{name}: none of the configured fallbacks exist.")
+                msg = f"{name}: none of the configured fallbacks exist."
+                raise FormatError(msg)
         else:
-            raise FormatError(f"Unknown animation source: {name!r}.")
+            msg = f"Unknown animation source: {name!r}."
+            raise FormatError(msg)
         visiting.remove(name)
         resolved[name] = group
         return group
@@ -257,7 +281,8 @@ def apply_profile(document: SpriteDocument, profile: ProjectProfile) -> SpriteDo
     if rush.enabled:
         missing = set(rush.actions) - resolved.keys()
         if missing:
-            raise FormatError(f"Unknown rush animations: {', '.join(sorted(missing))}.")
+            msg = f"Unknown rush animations: {', '.join(sorted(missing))}."
+            raise FormatError(msg)
         for group in result.groups:
             if (rush.actions and group.name not in rush.actions) or group.rush_frame < 0:
                 continue
@@ -315,11 +340,14 @@ def build_sprite(source: str | Path, profile: ProjectProfile, destination: str |
         candidates = {path.name.casefold(): path for path in source.iterdir() if path.is_file()}
         source = next((candidates[name] for name in ("sprite.json", "framedata.xml", "animdata.xml") if name in candidates), source)
     if not source.is_file() or source.suffix.lower() not in (".json", ".xml"):
-        raise FormatError("Choose a sprite JSON/XML file or a folder containing Sprite.json, FrameData.xml or AnimData.xml.")
+        msg = "Choose a sprite JSON/XML file or a folder containing Sprite.json, FrameData.xml or AnimData.xml."
+        raise FormatError(msg)
     if destination == source.parent or destination in source.parents or source.parent in destination.parents:
-        raise FormatError("Build output must be separate from the source sprite folder.")
+        msg = "Build output must be separate from the source sprite folder."
+        raise FormatError(msg)
     if destination.exists() and (not destination.is_dir() or
         (not overwrite and any(not path.is_dir() for path in destination.iterdir()))):
-        raise FormatError("Build output already contains files; use --overwrite to replace generated assets.")
+        msg = "Build output already contains files; use --overwrite to replace generated assets."
+        raise FormatError(msg)
     document = apply_profile(SpriteDocument.load(source), profile)
     return document.export(destination, ProjectBuildFormat(profile))

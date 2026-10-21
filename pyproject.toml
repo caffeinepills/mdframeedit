@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "MD Frame Editor"
 dynamic = ["version"]
-description = "Frame editor for FrameData.xml and AnimData.xml sprite sheets."
+description = "Sprite editor with native JSON authoring and FrameData.xml/AnimData.xml interchange."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,8 +16,8 @@ dependencies = [
 gui = ["pyglet~=2.0.7", "PySide6~=6.9.1"]
 
 [tool.setuptools]
-py-modules = ["main", "data", "formats", "utils", "cli", "conversion", "action_alias"]
-packages = ["gui"]
+py-modules = ["main", "data", "utils", "cli", "conversion", "action_alias"]
+packages = ["gui", "formats"]
 
 [tool.setuptools.dynamic]
 version = {attr = "data.VERSION"}

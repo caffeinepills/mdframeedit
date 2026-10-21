@@ -52,7 +52,7 @@ from data import (
     Offset,
     SheetFormat, EditState,
 )
-from formats import detect_format, validate_export
+from formats import SpriteFormat, validate_export
 from gui.batchadd import ActionAliasDialog
 from gui.batchedit import BatchEditDialog
 from gui.editor import Ui_MainWindow
@@ -127,7 +127,7 @@ def undoable(text: str) -> Callable[
     def decorate(method: Callable[..., EditResult]) -> Callable[..., EditResult]:
         @wraps(method)
         def record(editor: AnimationEditor, *args: object, **kwargs: object) -> EditResult:
-            if editor.loaded_tree is None or editor.editDepth or editor.restoringEdit:
+            if editor.sheet_format is None or editor.editDepth or editor.restoringEdit:
                 return method(editor, *args, **kwargs)
             before = editor.captureEditState()
             editor.editDepth += 1
@@ -752,7 +752,8 @@ class AnimationEditor(AnimationSerialization):
         self.document_host = document_host
         self.groups: list[AnimGroup] = []
         self.file_name = ""
-        self.sheet_format: SheetFormat | None = None
+        self.texture_name = "Anim.png"
+        self.sheet_format: SheetFormat | str | None = None
         self.shadow_size_present = True
         self.loaded_shadow_size = 0
         self.loaded_tree: ElementTree.ElementTree | None = None
@@ -1321,8 +1322,8 @@ class AnimationEditor(AnimationSerialization):
         self.artworkReloadTimer.stop()
         self.artworkPath = None
         self.artworkDigest = None
-        if self.sheet_format == SheetFormat.SINGLE and self.sheet_image is not None:
-            self.artworkPath = pathlib.Path(self.file_name).resolve().with_name("Anim.png")
+        if self.sheet_format in (SheetFormat.SINGLE, SheetFormat.NATIVE) and self.sheet_image is not None:
+            self.artworkPath = pathlib.Path(self.file_name).resolve().with_name(self.texture_name)
             self.artworkDigest = sha256(
                 self.sheet_image.get_data("RGBA", -self.sheet_image.width * 4)
             ).digest()
@@ -1498,7 +1499,7 @@ class AnimationEditor(AnimationSerialization):
         if size in (0, 1, 2):
             with QtCore.QSignalBlocker(self.ui.shadowSizeComboBox):
                 self.ui.shadowSizeComboBox.setCurrentIndex(size)
-            self.ui.shadowSizeComboBox.setEnabled(self.loaded_tree is not None)
+            self.ui.shadowSizeComboBox.setEnabled(self.sheet_format is not None)
         if hasattr(self, "openGLWidget") and size in (0, 1, 2):
             self._refresh_shadow_display()
 
@@ -1520,7 +1521,7 @@ class AnimationEditor(AnimationSerialization):
 
     @undoable("Change Shadow Size")
     def apply_shadow_size(self, size: int) -> None:
-        if not self.loaded_tree:
+        if self.sheet_format is None:
             return
         self.shadow_size = size
         # An explicit selection writes ShadowSize even if it was omitted on input.
@@ -1616,18 +1617,27 @@ class AnimationEditor(AnimationSerialization):
 
                     self.set_animation()
 
-    def save_action_trigger(self) -> None:
-        if self.loaded_tree:
-            self._save_document(self.file_name)
+    def save_action_trigger(self) -> bool:
+        if self.sheet_format is None:
+            return False
+        if self.sheet_format != SheetFormat.NATIVE:
+            return self.save_as_action_trigger()
+        return self._save_document(self.file_name)
 
-    def save_as_action_trigger(self) -> None:
-        if self.loaded_tree:
-            label = self.sheet_format.value
+    def save_as_action_trigger(self) -> bool:
+        if self.sheet_format is not None:
+            suggested = pathlib.Path(self.file_name)
+            if self.sheet_format != SheetFormat.NATIVE:
+                suggested = suggested.with_name(SheetFormat.NATIVE.value)
             file_name, _ = QFileDialog.getSaveFileName(
-                self.window, f"Save {label}", self.file_name, f"{label} data (*.xml)"
+                self.window, "Save Sprite", str(suggested), "Sprite document (*.json)"
             )
             if file_name:
-                self._save_document(file_name)
+                target = pathlib.Path(file_name)
+                if not target.suffix:
+                    target = target.with_suffix(".json")
+                return self._save_document(target)
+        return False
 
     def _save_document(self, file_name: str | PathLike[str]) -> bool:
         if not file_name:
@@ -1635,24 +1645,16 @@ class AnimationEditor(AnimationSerialization):
         target = pathlib.Path(file_name)
         if self.document_host and not self.document_host.can_save_path(self, target):
             return False
-        other = (
-            SheetFormat.MULTI
-            if self.sheet_format == SheetFormat.SINGLE
-            else SheetFormat.SINGLE
-        )
-        if target.name.casefold() == other.value.casefold():
-            self.create_error_popup(
-                f"Use Export to {other.value} to convert this animation."
-            )
-            return False
-        if not self._export_bundle(target.parent, self.sheet_format, target.name):
+        if not self._export_bundle(target.parent, SheetFormat.NATIVE, target.name):
             return False
         self.file_name = str(target)
-        self.loaded_tree = ElementTree.parse(target)
+        self.sheet_format = SheetFormat.NATIVE
+        self.loaded_tree = None
+        self.texture_name = target.with_suffix(".png").name
+        self.single_loaded = True
+        self.ui.groupBox_5.setTitle("Sprite Sheet (JSON)")
         self.trackArtwork()
-        self.shadow_size_present = (
-            self.loaded_tree.getroot().find("ShadowSize") is not None
-        )
+        self.shadow_size_present = self.shadow_size_present or self.shadow_size != self.loaded_shadow_size
         self.loaded_shadow_size = self.shadow_size
         for item in self._get_action_list_items():
             item.anim_group.modified = False
@@ -2090,6 +2092,14 @@ class AnimationEditor(AnimationSerialization):
             if ret == QtWidgets.QMessageBox.StandardButton.Yes:
                 row = self.ui.actionListWidget.row(current)
                 self.groups = [group for group in self.groups if group is not current.anim_group]
+                # Copies retain their own sequences when their source is deleted.
+                # Detach the relationship so native saves cannot retain a dangling
+                # reference. The surrounding undo command restores both changes.
+                for item in self._get_action_list_items():
+                    if item.anim_group.copy_name == current.anim_group.name:
+                        item.anim_group.copy_name = ""
+                        item.anim_group.modified = True
+                        item.update_text()
                 taken = self.ui.actionListWidget.takeItem(row)
                 del taken
 
@@ -2527,22 +2537,13 @@ class AnimationEditor(AnimationSerialization):
             self.document_host.open_files_dialog()
             return
         file_name, _ = QFileDialog.getOpenFileName(
-            self.window, "Select Animation File", "", "Animation File (*.xml)"
+            self.window, "Select Sprite File", "", "Sprite Files (*.json *.xml)"
         )
         if file_name:
             self.load_animation(file_name)
 
     def load_animation(self, file_name: str | PathLike[str]) -> bool:
-        try:
-            format_name = detect_format(ElementTree.parse(file_name).getroot())
-        except (OSError, ElementTree.ParseError) as error:
-            self.create_error_popup(str(error))
-            return False
-        loaded = (
-            self.load_sheet(file_name)
-            if format_name == SheetFormat.SINGLE
-            else self.import_multiple_sheets(file_name)
-        )
+        loaded = self._load_sprite_document(file_name)
         if loaded and self.ui.actionListWidget.count():
             self.ui.actionListWidget.setCurrentRow(0)
             self.ui.actionListWidget.item(0).mouseClickEvent(None)
@@ -2552,7 +2553,7 @@ class AnimationEditor(AnimationSerialization):
         return self._load_sprite_document(file_name, SheetFormat.SINGLE)
 
     def _load_sprite_document(
-        self, file_name: str | PathLike[str], expected: SheetFormat
+        self, file_name: str | PathLike[str], expected: SheetFormat | SpriteFormat | None = None
     ) -> bool:
         try:
             document = SpriteDocument.load(file_name, expected)
@@ -2586,9 +2587,13 @@ class AnimationEditor(AnimationSerialization):
         self.cell_edit_revision = document.cell_edit_revision
         self.loaded_tree = document.source_tree
         self.sheet_format = document.sheet_format
-        modeName = "Single" if document.sheet_format == SheetFormat.SINGLE else "Multi"
+        self.texture_name = document.texture_name
+        format_labels: dict[SheetFormat | str, str] = {
+            SheetFormat.NATIVE: "JSON", SheetFormat.SINGLE: "Single", SheetFormat.MULTI: "Multi",
+        }
+        modeName = format_labels.get(document.sheet_format, str(document.sheet_format))
         self.ui.groupBox_5.setTitle(f"Sprite Sheet ({modeName})")
-        self.single_loaded = document.sheet_format == SheetFormat.SINGLE
+        self.single_loaded = document.sheet_format != SheetFormat.MULTI
         self.shadow_size = document.shadow_size
         self.shadow_size_present = document.shadow_size_present
         self.loaded_shadow_size = document.loaded_shadow_size
@@ -2684,6 +2689,8 @@ class AnimationEditor(AnimationSerialization):
         self.updateArtworkWatch()
         self.sheet_preview_images.clear()
         self.single_loaded = None
+        self.sheet_format = None
+        self.loaded_tree = None
         self.sheet_image = None
         self.action_pt_image = None
         self.image_grid: TopLeftGrid | None = None
@@ -3013,7 +3020,7 @@ class AnimationEditor(AnimationSerialization):
         return self._load_sprite_document(file_name, SheetFormat.MULTI)
 
     def export_single_sheet(self) -> None:
-        if self.loaded_tree:
+        if self.sheet_format is not None:
             options = QFileDialog.Option.ShowDirsOnly
 
             directory = QFileDialog.getExistingDirectory(
@@ -3056,7 +3063,7 @@ class AnimationEditor(AnimationSerialization):
     def _export_bundle(
         self,
         directory: str | PathLike[str],
-        format_name: SheetFormat,
+        format_name: SheetFormat | SpriteFormat,
         xml_name: str | None = None,
     ) -> bool:
         try:
@@ -3067,13 +3074,15 @@ class AnimationEditor(AnimationSerialization):
             self.create_error_popup(str(error))
             return False
         message = (
+            "Sprite bundle" if isinstance(format_name, SpriteFormat) else
+            "Sprite document" if format_name == SheetFormat.NATIVE else
             "Single sheet" if format_name == SheetFormat.SINGLE else "Multisheet frames"
         )
         self.ui.statusBar.showMessage(f"{message} were output successfully.", 3000)
         return True
 
     def export_multiple_sheets(self) -> None:
-        if self.loaded_tree:
+        if self.sheet_format is not None:
             options = QFileDialog.Option.ShowDirsOnly
 
             directory = QFileDialog.getExistingDirectory(
@@ -3213,7 +3222,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         """Enable the reload preference only for an active single-sheet document."""
         editor = self.current_editor
         self.preferenceActions["autoReloadArtwork"].setEnabled(
-            editor is not None and editor.sheet_format == SheetFormat.SINGLE
+            editor is not None and editor.sheet_format in (SheetFormat.SINGLE, SheetFormat.NATIVE)
         )
 
     def _restoreVisiblePanelLayout(self) -> None:
@@ -3313,7 +3322,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
 
     def open_files_dialog(self) -> list[AnimationEditor]:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Open Sprites", "", "Animation Files (*.xml)"
+            self, "Open Sprites", "", "Sprite Files (*.json *.xml)"
         )
         return self.open_files(paths)
 
@@ -3335,7 +3344,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
                 return editor
         page = self.documentTabs.currentWidget()
         editor = self.current_editor
-        reuse_empty = editor is not None and editor.loaded_tree is None
+        reuse_empty = editor is not None and editor.sheet_format is None
         if not reuse_empty:
             page, editor = self._create_document()
         try:
@@ -3454,6 +3463,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         return True
 
     def document_saved(self, editor: AnimationEditor) -> None:
+        self.updateArtworkReloadAction()
         for page, document in self._editors.items():
             if document is editor:
                 self._saved_states[page] = self._document_state(editor)
@@ -3462,7 +3472,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
 
     def _confirm_close(self, page: QtWidgets.QWidget) -> bool:
         editor = self._editors[page]
-        if editor.loaded_tree is None or self._saved_states.get(
+        if editor.sheet_format is None or self._saved_states.get(
             page
         ) == self._document_state(editor):
             return True
@@ -3479,7 +3489,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         if choice == QtWidgets.QMessageBox.StandardButton.Cancel:
             return False
         if choice == QtWidgets.QMessageBox.StandardButton.Save:
-            return editor._save_document(editor.file_name)
+            return editor.save_action_trigger()
         return choice == QtWidgets.QMessageBox.StandardButton.Discard
 
     def close_document(self, index: int) -> bool:

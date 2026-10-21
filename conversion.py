@@ -25,7 +25,9 @@ from data import (
     TLRectangle,
     center_bounds,
 )
-from formats import detect_format, validate_export, validate_source
+from formats import SpriteFormat, get_adapter, validate_export
+from formats.adapters import detect_adapter
+from formats.base import DocumentT
 from utils import (
     FormatError,
     check_duplicate_images,
@@ -239,7 +241,8 @@ class SpriteDocument(AnimationSerialization):
     source_tree: ElementTree.ElementTree | None = field(
         default=None, init=False, repr=False
     )
-    sheet_format: SheetFormat | None = field(default=None, init=False)
+    sheet_format: SheetFormat | str | None = field(default=None, init=False)
+    texture_name: str = "Anim.png"
 
     def __post_init__(self):
         self.image_grid = ImageGrid(
@@ -398,18 +401,17 @@ class SpriteDocument(AnimationSerialization):
         return document
 
     @classmethod
-    def load(cls, path, expected=None):
+    def load(
+        cls: type[DocumentT],
+        path: str | pathlib.Path,
+        expected: SheetFormat | SpriteFormat | None = None,
+    ) -> DocumentT:
         path = pathlib.Path(path)
-        tree = validate_source(path, expected)
-        root = tree.getroot()
-        if detect_format(root) == SheetFormat.SINGLE:
-            document = cls._load_single(path.parent, root)
-        else:
-            document = cls._load_multi(path.parent, root)
-        document._resolve_copies()
-        document.loaded_action_points = copy.deepcopy(document.action_points)
-        document.source_tree = tree
-        document.sheet_format = detect_format(root)
+        if path.suffix.lower() == ".json" and isinstance(expected, SheetFormat) and expected != SheetFormat.NATIVE:
+            raise FormatError("This is native JSON data; use its matching loader.")
+        adapter = get_adapter(expected) if expected is not None else detect_adapter(path)
+        document = adapter.read(path, cls)
+        document.sheet_format = adapter.document_format
         return document
 
     @staticmethod
@@ -657,41 +659,47 @@ class SpriteDocument(AnimationSerialization):
         tree = ElementTree.ElementTree(root)
         write_xml(tree, file_name)
 
-    def export(self, directory, format_name, xml_name=None):
+    def export(
+        self,
+        directory: str | pathlib.Path,
+        format_name: SheetFormat | SpriteFormat,
+        filename: str | None = None,
+        *,
+        xml_name: str | None = None,
+    ) -> pathlib.Path:
         """Validate and render the complete bundle before touching its destination."""
         directory = pathlib.Path(directory)
-        xml_name = xml_name or format_name.value
-        if pathlib.Path(xml_name).suffix.lower() != ".xml":
-            raise FormatError("Animation data must be saved as an XML file.")
-        validate_export(self, format_name)
+        adapter = get_adapter(format_name)
+        if filename is not None and xml_name is not None:
+            raise FormatError("Specify filename or the legacy xml_name argument, not both.")
+        filename = filename or xml_name or adapter.default_filename
+        adapter.check_filename(filename)
         # Staging also catches encoding/layout failures before an overwrite.
         directory.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
             prefix="mdframeedit-export-", dir=directory.parent
         ) as temporary:
             stage = pathlib.Path(temporary)
-            if format_name == SheetFormat.SINGLE:
-                self._write_single_sheet(stage)
-            else:
-                self._write_multiple_sheets(stage)
-            validate_source(stage / format_name.value, format_name)
+            adapter.write(self, stage, filename)
+            adapter.validate_written(stage, filename, type(self))
+            if not (stage / filename).is_file() or any(not path.is_file() for path in stage.iterdir()):
+                raise FormatError("Format adapters must write a metadata file and flat companion files.")
             directory.mkdir(parents=True, exist_ok=True)
             files = sorted(
-                stage.iterdir(), key=lambda path: path.suffix.lower() == ".xml"
+                stage.iterdir(), key=lambda path: path.name == filename
             )
-            replacements = [
+            replacements: list[tuple[pathlib.Path | None, pathlib.Path]] = [
                 (
                     path,
                     directory
-                    / (xml_name if path.name == format_name.value else path.name),
+                    / path.name,
                 )
                 for path in files
             ]
-            if (
-                format_name == SheetFormat.SINGLE
-                and not (stage / "Offsets.png").exists()
-            ):
-                replacements.append((None, directory / "Offsets.png"))
+            for obsolete in adapter.obsolete_files(stage):
+                if pathlib.Path(obsolete).name != obsolete or obsolete in (".", "..") or (stage / obsolete).exists():
+                    raise FormatError("Invalid obsolete companion filename from format adapter.")
+                replacements.append((None, directory / obsolete))
             backup = stage / "backup"
             backup.mkdir()
             for _, target in replacements:
@@ -725,7 +733,7 @@ class SpriteDocument(AnimationSerialization):
                     msg = f"Save failed. Original file backups are in {rescue}."
                     raise FormatError(msg) from write_error
                 raise
-        return directory / xml_name
+        return directory / filename
 
     def _write_single_sheet(self, directory):
         self.write_single_xml(str(directory / "FrameData.xml"))

@@ -156,7 +156,7 @@ class SpriteInfoDialog(QtWidgets.QDialog):
         return (
             (
                 "Mode:",
-                "Single sheet"
+                "Native JSON" if editor.sheet_format == SheetFormat.NATIVE else "Single sheet"
                 if editor.sheet_format == SheetFormat.SINGLE
                 else "Multi-sheet",
             ),

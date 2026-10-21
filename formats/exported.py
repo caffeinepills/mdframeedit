@@ -1,4 +1,4 @@
-"""Separate source and export validation for the different formats."""
+"""Validation for the exported FrameData.xml and AnimData.xml formats."""
 
 from __future__ import annotations
 
@@ -304,6 +304,9 @@ def validate_export(
     format_name: SheetFormat,
 ) -> None:
     """Reject exports that would discard artwork, timing, or attachment data."""
+    if format_name not in (SheetFormat.SINGLE, SheetFormat.MULTI):
+        msg = "Use native format validation for JSON documents."
+        raise FormatError(msg)
     single = format_name == SheetFormat.SINGLE
     if not editor.groups or editor.image_grid is None:
         msg = "No sprite data to save."

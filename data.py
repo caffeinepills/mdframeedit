@@ -29,6 +29,7 @@ FD_STR = {
 
 
 class SheetFormat(Enum):
+    NATIVE = "Sprite.json"
     SINGLE = "FrameData.xml"
     MULTI = "AnimData.xml"
 

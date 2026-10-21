@@ -1,20 +1,123 @@
-"""Editable project profiles and derived sprite builds, separate from authoring."""
-
+"""YAML project/rig profiles and derived sprite builds."""
 from __future__ import annotations
 
 import copy
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
+import yaml
+
 from conversion import SpriteDocument
 from data import AnimGroup, Offset
-from formats import NativeFormat
-from formats.base import DocumentT
+from formats import DocumentT, NativeFormat
 from formats.native import write_packed_document
 from utils import FormatError
+
+
+PROJECT_FORMATS = ("mdfe-project", "mdframeedit-project")
+
+
+def validate_point_name(value: object) -> str:
+    if not isinstance(value, str) or not value.strip() or value != value.strip() or any(ord(c) < 32 for c in value):
+        msg = "Action Point names must be nonempty text without surrounding whitespace or control characters."
+        raise FormatError(msg)
+    return value
+
+
+def validate_rig_id(value: object) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+        msg = "Rig Profile id must contain letters, digits, dots, underscores or hyphens."
+        raise FormatError(msg)
+    return value
+
+
+def validate_point_names(value: object, label: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        msg = f"{label} must be a list of names."
+        raise FormatError(msg)
+    names = tuple(validate_point_name(name) for name in value)
+    if len(set(names)) != len(names):
+        msg = f"{label} contains duplicate names."
+        raise FormatError(msg)
+    return names
+
+
+class _UniqueSafeLoader(yaml.SafeLoader):
+    """Reject duplicate keys as well as SafeLoader's unsafe object tags."""
+
+    def construct_mapping(self, node, deep=False):
+        result = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if not isinstance(key, str) or key in result:
+                msg = "Duplicate or non-string YAML profile key; keys must be unique strings."
+                raise FormatError(msg)
+            result[key] = self.construct_object(value_node, deep=deep)
+        return result
+
+
+@dataclass(frozen=True)
+class RigProfile:
+    id: str
+    name: str
+    action_points: tuple[str, ...]
+    suggested_actions: tuple[str, ...] = ()
+
+
+def load_profile_yaml(path: str | Path):
+    """Read safe YAML, rejecting duplicate keys at every nesting level."""
+    try:
+        return yaml.load(Path(path).read_text(encoding="utf-8-sig"), Loader=_UniqueSafeLoader)
+    except (OSError, UnicodeError, yaml.YAMLError) as error:
+        msg = f"Cannot load YAML profile {path}: {error}"
+        raise FormatError(msg) from error
+
+
+def rig_from_data(data: object) -> RigProfile:
+    """Validate a standalone rig or an embedded rig with supplied id/version."""
+    required = {"version", "id", "name", "action_points"}
+    if not isinstance(data, dict) or required - data.keys() or data.keys() - (required | {"suggested_actions"}):
+        msg = "Rig Profile: missing or unknown fields."
+        raise FormatError(msg)
+    if type(data["version"]) is not int or data["version"] != 1:
+        msg = "Unsupported Rig Profile version; expected 1."
+        raise FormatError(msg)
+    validate_rig_id(data["id"])
+    name = validate_point_name(data["name"])
+    return RigProfile(data["id"], name, validate_point_names(data["action_points"], "action_points"),
+                      validate_point_names(data.get("suggested_actions", []), "suggested_actions"))
+
+
+def load_rig_profiles(path: str | Path) -> dict[str, RigProfile]:
+    """Offer named project rigs or a standalone rig through the same selector."""
+    data = load_profile_yaml(path)
+    if isinstance(data, dict) and data.get("format") in PROJECT_FORMATS:
+        return profile_from_data(data).rigs
+    rig = rig_from_data(data)
+    return {rig.id: rig}
+
+
+def load_rig_profile(path: str | Path, rig_id: str | None = None) -> RigProfile:
+    rigs = load_rig_profiles(path)
+    if rig_id is not None:
+        if rig_id not in rigs:
+            msg = f"Rig {rig_id!r} is missing from profile {path}."
+            raise FormatError(msg)
+        return rigs[rig_id]
+    if len(rigs) != 1:
+        msg = f"Choose a named rig from profile {path} ({len(rigs)} rigs available)."
+        raise FormatError(msg)
+    return next(iter(rigs.values()))
+
+
+def available_point_names(points, local_names=(), profile: RigProfile | None = None) -> tuple[str, ...]:
+    """Union conventions and authored names; never materialize coordinates."""
+    return tuple(dict.fromkeys((*local_names, *(profile.action_points if profile else ()),
+                               *(name for body in points.values() for name, _ in body.items()))))
 
 
 @dataclass(frozen=True)
@@ -56,6 +159,7 @@ class ProjectProfile:
     packing: PackingSettings = field(default_factory=PackingSettings)
     palette: PaletteSettings = field(default_factory=PaletteSettings)
     animations: AnimationSettings = field(default_factory=AnimationSettings)
+    rigs: dict[str, RigProfile] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -147,22 +251,19 @@ def _names(value: object, where: str) -> tuple[str, ...]:
     return tuple(_name(item, where) for item in value)
 
 
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            msg = f"Duplicate project profile field: {key!r}."
-            raise FormatError(msg)
-        result[key] = value
-    return result
-
-
 def profile_from_data(value: object) -> ProjectProfile:
     """Validate profile settings once, before loading artwork or writing outputs."""
-    data = _object(value, ("format", "version", "packing", "palette", "animations"), "Project profile")
-    if data.get("format") != "mdframeedit-project" or type(data.get("version")) is not int or data["version"] != 1:
+    data = _object(value, ("format", "version", "packing", "palette", "animations", "rigs"), "Project profile")
+    if data.get("format") not in PROJECT_FORMATS or type(data.get("version")) is not int or data["version"] != 1:
         msg = "Unsupported project profile format or version."
         raise FormatError(msg)
+    rigs = data.get("rigs", {})
+    if not isinstance(rigs, dict):
+        raise FormatError("rigs: expected a mapping keyed by rig ID.")
+    rig_rules = {}
+    for rig_id, definition in rigs.items():
+        definition = _object(definition, ("name", "action_points", "suggested_actions"), f"rigs.{rig_id}")
+        rig_rules[rig_id] = rig_from_data({**definition, "version": 1, "id": rig_id})
     packing = _object(data.get("packing", {}), ("padding", "power_of_two"), "packing")
     palette = _object(data.get("palette", {}), ("enabled", "include_transparent"), "palette")
     anim = _object(data.get("animations", {}), ("fallbacks", "custom", "rush"), "animations")
@@ -207,16 +308,13 @@ def profile_from_data(value: object) -> ProjectProfile:
             _bool(rush.get("enabled", False), "animations.rush.enabled"),
             _int(rush.get("divisor", 3), 1, "animations.rush.divisor"),
             _names(rush.get("actions", []), "animations.rush.actions"))),
+        rig_rules,
     )
 
 
 def load_profile(path: str | Path) -> ProjectProfile:
-    """Read user-editable UTF-8 JSON without imports, plugins or compiled settings."""
-    try:
-        return profile_from_data(json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=_unique_object))
-    except (ValueError, UnicodeError) as error:
-        msg = f"Invalid project profile JSON: {error}"
-        raise FormatError(msg) from error
+    """Read a user-editable YAML project profile."""
+    return profile_from_data(load_profile_yaml(path))
 
 
 def apply_profile(document: SpriteDocument, profile: ProjectProfile) -> SpriteDocument:
@@ -262,7 +360,8 @@ def apply_profile(document: SpriteDocument, profile: ProjectProfile) -> SpriteDo
         elif name in rules.fallbacks:
             for candidate in rules.fallbacks[name]:
                 if candidate in originals or candidate in rules.custom or candidate in rules.fallbacks:
-                    group = copy.deepcopy(resolve(candidate))
+                    source = resolve(candidate)
+                    group = copy.deepcopy(source)
                     group.name, group.idx, group.copy_name = name, -1, ""
                     break
             else:

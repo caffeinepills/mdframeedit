@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from collections.abc import Collection
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict, TypeVar, cast
@@ -29,13 +30,7 @@ PointName = Literal["left_hand", "center", "right_hand", "head"]
 EventName = Literal["rush_frame", "hit_frame", "return_frame"]
 
 
-class NativeActionPoints(TypedDict):
-    """Attachment coordinates for one atlas cell."""
-
-    left_hand: list[int]
-    center: list[int]
-    right_hand: list[int]
-    head: list[int]
+NativeActionPoints = dict[str, list[int]]
 
 
 class _RequiredPooledAnimation(TypedDict):
@@ -57,7 +52,7 @@ class NativePooledAnimation(_RequiredPooledAnimation, total=False):
 NativeFrameRecord = list[int | bool]
 
 
-class NativeSpriteData(TypedDict):
+class _RequiredSpriteData(TypedDict):
     """Native grid or packed data usable immediately after json.loads."""
 
     format: str
@@ -73,8 +68,19 @@ class NativeSpriteData(TypedDict):
     regions: list[NativeRegion | None]
 
 
+
+
+
+
+class NativeSpriteData(_RequiredSpriteData, total=False):
+    action_point_names: list[str]
+    rig_profile: str
+    rig_profile_id: str
+
+
 FORMAT = "mdframeedit"
 VERSION = 3
+NAMED_POINTS_VERSION = 4
 FRAME_INDEX = 0
 DURATION = 1
 FLIP = 2
@@ -125,11 +131,26 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _header(value: object) -> dict[str, object]:
-    data = _object(value, ROOT_FIELDS, ("format", "version"), "Sprite")
-    if data["format"] != FORMAT or type(data["version"]) is not int or data["version"] != VERSION:
+    allowed = (*ROOT_FIELDS, "rig_profile", "rig_profile_id", "action_point_names")
+    data = _object(value, allowed, ("format", "version"), "Sprite")
+    if data["format"] != FORMAT or type(data["version"]) is not int or data["version"] not in (VERSION, NAMED_POINTS_VERSION):
         msg = "Unsupported sprite JSON format or version."
         raise FormatError(msg)
-    _object(data, ROOT_FIELDS, ROOT_FIELDS, "Sprite")
+    _object(data, allowed, ROOT_FIELDS, "Sprite")
+    if data["version"] == VERSION and any(key in data for key in ("rig_profile", "rig_profile_id", "action_point_names")):
+        raise FormatError("Rig Profiles and named Action Points require native version 4.")
+    if "action_point_names" in data:
+        from project import validate_point_names
+        validate_point_names(data["action_point_names"], "action_point_names")
+    if "rig_profile" in data:
+        reference = data["rig_profile"]
+        if not isinstance(reference, str) or not reference.strip() or "://" in reference or any(ord(c) < 32 for c in reference) or Path(reference).suffix.lower() not in (".yaml", ".yml"):
+            raise FormatError("Rig Profile must be a YAML filesystem path.")
+    if "rig_profile_id" in data:
+        from project import validate_rig_id
+        validate_rig_id(data["rig_profile_id"])
+        if "rig_profile" not in data:
+            raise FormatError("A named rig requires a rig_profile YAML path.")
     texture = data["texture"]
     if (not isinstance(texture, str) or not texture or texture in (".", "..")
             or any(c in texture for c in '/\\<>:"|?*') or Path(texture).suffix.lower() != ".png"):
@@ -152,9 +173,16 @@ def _validate_common(data: dict[str, object], image_size: tuple[int, int]) -> in
         raise FormatError(msg)
     for point_value in points:
         if point_value is not None:
-            point = _object(point_value, POINT_NAMES, POINT_NAMES, "Action points")
-            for point_name in POINT_NAMES:
-                _pair(point[point_name], point_name)
+            if data["version"] == VERSION:
+                point = _object(point_value, POINT_NAMES, POINT_NAMES, "Action points")
+            elif not isinstance(point_value, dict):
+                raise FormatError("Action Points must be objects of named coordinates.")
+            else:
+                point = point_value
+            from project import validate_point_name
+            for point_name, coordinates in point.items():
+                validate_point_name(point_name)
+                _pair(coordinates, point_name)
     return count
 
 
@@ -185,6 +213,8 @@ def validate_data(data: object, image_size: tuple[int, int]) -> None:
     header = _header(data)
     count = _validate_common(header, image_size)
     _validate_tables(header, count)
+
+
 
 
 def _validate_copy_targets(copies: dict[str, str], names: set[str]) -> None:
@@ -230,8 +260,8 @@ def _validate_tables(data: dict[str, object], cell_count: int) -> None:
             raise FormatError("Each sequence must be a list of frame-record references.")
         for reference in sequence:
             used_frames.add(_reference(reference, len(frames), "Sequence frame"))
-    if not isinstance(animations, dict) or not animations:
-        raise FormatError("No animations found.")
+    if not isinstance(animations, dict):
+        raise FormatError("animations must be an object.")
     names: set[str] = set()
     indices: set[int] = set()
     copies: dict[str, str] = {}
@@ -278,18 +308,15 @@ def document_data(document: SpriteDocument, texture: str) -> NativeSpriteData:
 
 def _document_data(document: SpriteDocument, texture: str, layout: TextureLayout) -> NativeSpriteData:
     """Intern complete frame records and sequences without modifying the model."""
+    if getattr(document, "layers", None) or getattr(document, "base_template", "") or getattr(document, "attachment_layout", None):
+        raise FormatError("Native sprites cannot contain obsolete attachment composition data.")
     points: list[NativeActionPoints | None] = []
     for index in range(len(document.image_grid)):
         body = document.action_points.get(index)
         if body is None:
             points.append(None)
         else:
-            point_data: NativeActionPoints = {
-                "left_hand": _offset_data(body.left_hand),
-                "center": _offset_data(body.center),
-                "right_hand": _offset_data(body.right_hand),
-                "head": _offset_data(body.head),
-            }
+            point_data = {name: _offset_data(point) for name, point in body.items()}
             points.append(point_data)
     if any(type(index) is not int or not 0 <= index < len(points) for index in document.action_points):
         msg = "Action-point frame is outside the atlas."
@@ -348,6 +375,16 @@ def _document_data(document: SpriteDocument, texture: str, layout: TextureLayout
             or document.shadow_size != document.loaded_shadow_size else None,
             "action_points": points, "frames": frame_records,
             "sequences": sequence_records, "animations": animations}
+    if document.rig_profile or document.action_point_names or any(
+        point is not None and set(point) != set(POINT_NAMES) for point in points
+    ):
+        data["version"] = NAMED_POINTS_VERSION
+    if document.action_point_names:
+        data["action_point_names"] = list(document.action_point_names)
+    if document.rig_profile:
+        data["rig_profile"] = document.rig_profile.resolve().as_posix()
+    if document.rig_profile_id is not None:
+        data["rig_profile_id"] = document.rig_profile_id
     validate_data(data, layout.texture_size)
     return data
 
@@ -365,16 +402,28 @@ def write_packed_document(
     """Write cropped, padded texture regions for a derived project build."""
     packed, layout = pack_texture(document.sheet_image, (document.frame_width, document.frame_height),
                                   padding=padding, power_of_two=power_of_two)
-    _write_document(document, Path(path), packed, layout)
+    _write_document(document, Path(path), packed, layout, packed=True, padding=padding, power_of_two=power_of_two)
 
 
-def _write_document(document: SpriteDocument, path: Path, image: Image.Image, layout: TextureLayout) -> None:
+def _write_document(
+    document: SpriteDocument, path: Path, image: Image.Image, layout: TextureLayout,
+    *, packed: bool = False, padding: int = 1, power_of_two: bool = False,
+) -> None:
     """Serialize either texture layout using the same direct-use native schema."""
     path = Path(path)
     texture = path.with_suffix(".png").name
     data = _document_data(document, texture, layout)
+    if "rig_profile" in data:
+        data["rig_profile"] = relative_sprite_path(document.rig_profile, path.parent)
     image.save(path.with_name(texture), format="PNG")
     path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
+def relative_sprite_path(source: Path, directory: Path) -> str:
+    try:
+        return Path(os.path.relpath(source.resolve(), directory.resolve())).as_posix()
+    except ValueError:  # Different Windows drives cannot have a relative path.
+        return source.resolve().as_posix()
 
 
 def _texture_layout(data: NativeSpriteData, image_size: tuple[int, int]) -> TextureLayout:
@@ -391,7 +440,10 @@ def read_texture_layout(path: str | Path) -> TextureLayout:
         return _texture_layout(cast("NativeSpriteData", header), image.size)
 
 
-def load_document(path: str | Path, document_class: type[DocumentT]) -> DocumentT:
+def load_document(
+    path: str | Path, document_class: type[DocumentT], *,
+    _reference_directory: Path | None = None,
+) -> DocumentT:
     """Validate native files and construct the requested document subclass."""
     path = Path(path)
     try:
@@ -413,7 +465,11 @@ def load_document(path: str | Path, document_class: type[DocumentT]) -> Document
                               shadow_size_present=data["shadow_size"] is not None)
     for index, points in enumerate(data["action_points"]):
         if points is not None:
-            document.action_points[index] = ActionPoints(**{name: Offset(*points[name]) for name in POINT_NAMES})
+            document.action_points[index] = ActionPoints.from_named({name: Offset(*point) for name, point in points.items()})
+    document.action_point_names = tuple(data.get("action_point_names", ()))
+    if "rig_profile" in data:
+        document.rig_profile = ((_reference_directory or path.parent) / data["rig_profile"]).resolve()
+    document.rig_profile_id = data.get("rig_profile_id")
     _load_animations(document, data)
     document.loaded_action_points = copy.deepcopy(document.action_points)
     document.sheet_format = SheetFormat.NATIVE

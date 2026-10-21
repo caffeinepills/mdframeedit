@@ -25,9 +25,7 @@ from data import (
     TLRectangle,
     center_bounds,
 )
-from formats import SpriteFormat, get_adapter, validate_export
-from formats.adapters import detect_adapter
-from formats.base import DocumentT
+from formats import DocumentT, SpriteFormat, detect_adapter, get_adapter, validate_export
 from utils import (
     FormatError,
     check_duplicate_images,
@@ -243,6 +241,9 @@ class SpriteDocument(AnimationSerialization):
     )
     sheet_format: SheetFormat | str | None = field(default=None, init=False)
     texture_name: str = "Anim.png"
+    action_point_names: tuple[str, ...] = ()
+    rig_profile: Path | None = None
+    rig_profile_id: str | None = None
 
     def __post_init__(self):
         self.image_grid = ImageGrid(
@@ -284,7 +285,7 @@ class SpriteDocument(AnimationSerialization):
             include(tile.getchannel("A").getbbox(), index)
         for index, body in self.action_points.items():
             dx, dy = shifts.get(index, (0, 0))
-            for point in body.all_pos():
+            for _, point in body.items():
                 half_width = max(half_width, -point.x - dx, point.x + dx + 1)
                 half_height = max(half_height, -point.y - dy, point.y + dy + 1)
         if self.action_pt_image is not None:
@@ -330,7 +331,7 @@ class SpriteDocument(AnimationSerialization):
             if any(not (
                 0 <= point.x + sx + width // 2 < width
                 and 0 <= point.y + sy + height // 2 < height
-            ) for point in body.all_pos()):
+            ) for _, point in body.items()):
                 clipped.add(index)
         if self.action_pt_image is not None:
             grid = ImageGrid(self.action_pt_image, self.frame_width, self.frame_height)
@@ -399,6 +400,26 @@ class SpriteDocument(AnimationSerialization):
                             raise FormatError(msg)
         document.__post_init__()
         return document
+
+    @classmethod
+    def from_image(
+        cls: type[DocumentT], image: Image.Image, cell_width: int, cell_height: int,
+        *, pad_edges: bool = False,
+    ) -> DocumentT:
+        """Slice an image into cells, retaining every pixel and an empty Default action."""
+        if any(type(value) is not int or value < 1 for value in (cell_width, cell_height)):
+            raise FormatError("Cell width and height must be positive integers.")
+        width, height = image.size
+        padded_width = ((width + cell_width - 1) // cell_width) * cell_width
+        padded_height = ((height + cell_height - 1) // cell_height) * cell_height
+        if (width, height) != (padded_width, padded_height) and not pad_edges:
+            raise FormatError("The image does not divide into complete cells. Adjust the cell size or enable transparent edge padding.")
+        artwork = image.convert("RGBA")
+        if artwork.size != (padded_width, padded_height):
+            padded = Image.new("RGBA", (padded_width, padded_height))
+            padded.paste(artwork, (0, 0))
+            artwork = padded
+        return cls(artwork, cell_width, cell_height, groups=[AnimGroup(0, "Default")])
 
     @classmethod
     def load(
@@ -680,8 +701,8 @@ class SpriteDocument(AnimationSerialization):
             prefix="mdframeedit-export-", dir=directory.parent
         ) as temporary:
             stage = pathlib.Path(temporary)
-            adapter.write(self, stage, filename)
-            adapter.validate_written(stage, filename, type(self))
+            adapter.write_bundle(self, stage, filename, directory.resolve())
+            adapter.validate_bundle(stage, filename, type(self), directory.resolve())
             if not (stage / filename).is_file() or any(not path.is_file() for path in stage.iterdir()):
                 raise FormatError("Format adapters must write a metadata file and flat companion files.")
             directory.mkdir(parents=True, exist_ok=True)

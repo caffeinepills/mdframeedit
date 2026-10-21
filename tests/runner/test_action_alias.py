@@ -177,7 +177,7 @@ class ActionAliasTests(unittest.TestCase):
     def test_dialog_runs_worker_and_exposes_log(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6 import QtCore, QtWidgets
-        from gui.batchadd import ActionAliasDialog
+        from gui.batch import ActionAliasDialog
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         make_single(self.source)

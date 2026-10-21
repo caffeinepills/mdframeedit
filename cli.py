@@ -50,7 +50,7 @@ def positive_integer(value):
 def create_parser():
     parser = argparse.ArgumentParser(
         description="Convert native JSON and single-sheet/multi-sheet XML sprites without opening the editor.",
-        epilog="Other commands: palette INPUT; build INPUT --profile PROFILE.json -o OUTPUT.",
+        epilog="Other commands: palette INPUT; build INPUT --profile PROFILE.yaml -o OUTPUT.",
     )
     parser.add_argument("input", type=Path, help="source JSON/XML file or sprite folder")
     parser.add_argument(
@@ -328,13 +328,13 @@ def main(argv=None):
 
 def build_main(argv: list[str]) -> int:
     """Build sprites recursively using one editable project profile."""
-    from project_build import build_sprite, load_profile, plan_builds
+    from project import build_sprite, load_profile, plan_builds
     from utils import FormatError
 
     parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} build",
-        description="Build packed sprites from a source file or folder tree using one JSON project profile.")
+        description="Build packed sprites from a source file or folder tree using one YAML project profile.")
     parser.add_argument("input", type=Path, help="source sprite JSON/XML file or folder (searched recursively)")
-    parser.add_argument("--profile", type=Path, required=True, help="editable project profile JSON")
+    parser.add_argument("--profile", type=Path, required=True, help="editable project profile YAML")
     parser.add_argument("-o", "--output", type=Path, required=True, help="destination folder (preserves relative sprite folders)")
     parser.add_argument("--overwrite", action="store_true", help="replace generated files in an existing output folder")
     args = parser.parse_args(argv)

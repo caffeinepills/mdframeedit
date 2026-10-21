@@ -9,11 +9,14 @@ Run `python tests/runner/test_native_format.py` for native JSON/PNG round trips,
 XML interoperability, validation, save rollback and CLI conversion. The startup
 smoke test also covers native saving, reopening, undo and XML export in the UI.
 
+Run `python tests/runner/test_image_atlas.py` for image cell ordering, pixel
+preservation, explicit edge padding and native saving before actions are added.
+
 Run `python tests/runner/test_format_adapters.py` for the built-in/custom adapter
 boundary, native byte compatibility, metadata ordering, output validation and
 transaction rollback. No private local test fixtures are needed.
 
-Run `python tests/runner/test_project_build.py` for editable profile validation,
+Run `python tests/runner/test_project_build.py` for YAML project and named rig validation,
 derived animations/rush movement, palette output, packing settings, source
 isolation, transactional rollback and CLI builds. These are deterministic checks,
 without performance benchmarks or local sprite dependencies.

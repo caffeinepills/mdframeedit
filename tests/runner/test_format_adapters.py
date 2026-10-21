@@ -18,7 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from conversion import SpriteDocument
 from data import AnimationSequence, AnimFrame, AnimGroup, SheetFormat
 from formats import NativeFormat, SpriteFormat, get_adapter, validate_export
-from formats.base import DocumentT
+from formats import DocumentT
 from formats.native import write_document
 from utils import FormatError
 

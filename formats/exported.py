@@ -304,6 +304,8 @@ def validate_export(
     format_name: SheetFormat,
 ) -> None:
     """Reject exports that would discard artwork, timing, or attachment data."""
+    if any(not layer.reference_only for layer in getattr(editor, "layers", [])):
+        raise FormatError("Migrate historical attachments before exporting individual sprite resources to XML.")
     if format_name not in (SheetFormat.SINGLE, SheetFormat.MULTI):
         msg = "Use native format validation for JSON documents."
         raise FormatError(msg)
@@ -413,7 +415,11 @@ def _validate_export_action_points(
     *,
     single: bool,
 ) -> None:
+    if getattr(editor, "rig_profile", None) or getattr(editor, "rig_profile_id", None) is not None or getattr(editor, "action_point_names", ()):
+        raise FormatError("XML cannot preserve Rig Profile references or named Action Point declarations. Save native JSON instead.")
     for index, body in editor.action_points.items():
+        if set(dict(body.items())) != {"left_hand", "center", "right_hand", "head"}:
+            raise FormatError("XML cannot represent custom or unset Action Points. Save native JSON to preserve them.")
         if not 0 <= index < len(editor.image_grid):
             msg = "Attachment point frame is outside the atlas."
             raise FormatError(msg)

@@ -8,18 +8,16 @@ from typing import TYPE_CHECKING
 
 from PIL import Image, ImageChops, ImageDraw
 
-from data import AnimFrame, ArtworkInfo, Offset, PaletteColor
+from data import AnimFrame, ArtworkInfo, FormatError, Offset, PaletteColor
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterable, Mapping
     from os import PathLike
-    from types import TracebackType
     from xml.etree.ElementTree import Element, ElementTree
 
-    from pyglet.image import AbstractImage, ImageData
+    from pyglet.image import AbstractImage
 
     from data import ActionPoints, Rectangle, TLRectangle
-    from main import PygletWidget
 
 _TEMPLATE_PNG = (
     "iVBORw0KGgoAAAANSUhEUgAAABYAAAAICAYAAAD9aA/QAAAABGdBTUEAALGPC/xhBQ"
@@ -85,10 +83,6 @@ def shadow_image(size: int, black: bool = False) -> Image.Image:
     return image
 
 
-class FormatError(ValueError):
-    """Error for when there is a failure to format the XML data."""
-
-
 def integer(element: Element, tag: str, default: int | None = None) -> int:
     text = element.findtext(tag)
     if text is None or not text.strip():
@@ -131,50 +125,6 @@ def get_image_size(path: str | PathLike[str]) -> tuple[int, int]:
         raise FormatError(msg) from error
 
 
-class Camera:
-    def __init__(
-        self, glWidget: PygletWidget, position: tuple[float, float],
-    ) -> None:
-        self.glWidget = glWidget
-        self.x, self.y = position
-        self._zoom = 1.0
-
-    @property
-    def zoom(self) -> float:
-        return self._zoom
-
-    @zoom.setter
-    def zoom(self, value: float) -> None:
-        self._zoom = max(min(value, 4.0), 0.25)
-
-    def __enter__(self) -> None:
-        self.begin()
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
-        self.end()
-
-    def begin(self) -> None:
-        x = -(self.glWidget.width() // 2) / self._zoom + self.x
-        y = -(self.glWidget.height() // 3) / self._zoom + self.y
-
-        view_matrix = self.glWidget.view.translate(
-            (-x * self._zoom, -y * self._zoom, 0)
-        )
-        view_matrix = view_matrix.scale((self._zoom, self._zoom, 1))
-        self.glWidget.view = view_matrix
-
-    def end(self) -> None:
-        x = -(self.glWidget.width() // 2) / self._zoom + self.x
-        y = -(self.glWidget.height() // 3) / self._zoom + self.y
-
-        view_matrix = self.glWidget.view.scale((1 / self._zoom, 1 / self._zoom, 1))
-        view_matrix = view_matrix.translate((x * self._zoom, y * self._zoom, 0))
-        self.glWidget.view = view_matrix
 
 
 def check_duplicate_images(
@@ -343,24 +293,6 @@ def get_action_points_from_pil_image(
     return r, g, b, black
 
 
-def create_plus_image(size: int, color: tuple[int, int, int, int]) -> ImageData:
-    import pyglet
-
-    # Create a new image with a white background
-    dimensions = (size, size)
-    image = Image.new("RGBA", dimensions, (0, 0, 0, 0))
-
-    draw = ImageDraw.Draw(image)
-
-    center = (size // 2, size // 2)
-    draw.line(
-        [(center[0] - 2, center[1]), (center[0] + 2, center[1])], fill=color, width=1
-    )
-    draw.line(
-        [(center[0], center[1] - 2), (center[0], center[1] + 2)], fill=color, width=1
-    )
-
-    return pyglet.image.ImageData(image.width, image.height, "RGBA", image.tobytes())
 
 
 def overlap_colors(

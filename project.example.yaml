@@ -1,0 +1,30 @@
+format: mdfe-project
+version: 1
+
+# Optional conventions. Each sprite chooses a rig; coordinates stay in the sprite.
+rigs:
+  monster:
+    name: Monster
+    action_points: [head, center, left_hand, right_hand]
+    suggested_actions: [Idle, Walk]
+
+packing:
+  padding: 1
+  power_of_two: false
+
+palette:
+  enabled: true
+  include_transparent: false
+
+animations:
+  fallbacks:
+    Run: [Walk, Idle]
+  custom:
+    Stop:
+      source: Walk
+      frames: [0]
+      duration: 8
+  rush:
+    enabled: false
+    divisor: 3
+    actions: []

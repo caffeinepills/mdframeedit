@@ -47,7 +47,8 @@ class ProjectBuildTest(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="mdfe-project-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        # Windows TEMP can use an 8.3 alias while production resolves full paths.
+        self.root = Path(temporary.name).resolve()
         self.document = make_document()
         self.source = self.document.export(self.root / "source", SheetFormat.NATIVE)
 

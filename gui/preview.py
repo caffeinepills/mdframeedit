@@ -113,7 +113,7 @@ class Camera:
 
 
 def create_point_marker(size: int, color: tuple[int, int, int, int]) -> ImageData:
-    """A magenta plus with a one-pixel colored center and transparent corners."""
+    """A colored plus with transparent corners."""
     import pyglet
 
     dimensions = (size, size)
@@ -122,10 +122,8 @@ def create_point_marker(size: int, color: tuple[int, int, int, int]) -> ImageDat
     draw = ImageDraw.Draw(image)
 
     center = (size // 2, size // 2)
-    magenta = (255, 0, 255, color[3])
-    draw.line((0, center[1], size - 1, center[1]), fill=magenta, width=1)
-    draw.line((center[0], 0, center[0], size - 1), fill=magenta, width=1)
-    draw.point(center, fill=color)
+    draw.line((0, center[1], size - 1, center[1]), fill=color, width=1)
+    draw.line((center[0], 0, center[0], size - 1), fill=color, width=1)
 
     return pyglet.image.ImageData(image.width, image.height, "RGBA", image.tobytes())
 

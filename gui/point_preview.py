@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import copy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from uuid import uuid4
@@ -10,7 +11,8 @@ import pyglet
 from PySide6 import QtCore, QtWidgets
 
 from gui import ScreenFitDialog
-from gui.preview import TopLeftGrid
+from gui.preview import TopLeftGrid, PreviewColumnGroup
+from data import SheetFormat
 from preview import (
     ActionPointRelationship,
     Presentation,
@@ -19,6 +21,10 @@ from preview import (
     sample_sequence,
     sample_sprite,
     synchronized_time,
+    PREVIEW_SUFFIX,
+    PREVIEW_FILTER,
+    SHADOW_ANCHOR,
+    preview_save_path,
 )
 from project import available_point_names
 
@@ -35,6 +41,7 @@ class PreviewSprite:
     follow_action: bool = False
     inherit_mirroring: bool = False
     visible: bool = True
+    separate_alignment: bool = False
     playing: bool = False
     ticks: float = 0
     selection: object = None
@@ -66,6 +73,7 @@ class ActionPointPreview:
         self.members[0].revision = self.source_stamp(root)
         self.order = [self.members[0].identity]
         self.views = {}
+        self.file_path = None
         self.last_time = time.monotonic()
         self.last_refresh = 0
         self.timer = QtCore.QTimer(root.window)
@@ -157,8 +165,10 @@ class ActionPointPreview:
                 title = self.label(member.editor)
                 index = tabs.addTab(title)
                 tabs.setTabData(index, identity)
-                role = "Main sprite" if member is self.members[0] else "Preview sprite"
-                tabs.setTabToolTip(index, f"{role}: {member.editor.file_name or title} — resource edits use its own Save/Undo; preview binding is editor state")
+                role = "Snapshot (read-only)" if member.editor.frozen_preview else "Main sprite" if member is self.members[0] else "Preview sprite"
+                tabs.setTabToolTip(index, f"{role}: {member.editor.file_name or title} — " +
+                                  ("captured artwork and animation data do not follow source edits" if member.editor.frozen_preview
+                                   else "resource edits use its own Save/Undo; preview binding is editor state"))
                 if identity == selected:
                     tabs.setCurrentIndex(index)
             index = tabs.addTab("+")
@@ -174,14 +184,21 @@ class ActionPointPreview:
             return
         resource = editor.file_name or self.label(editor)
         short_resource = str(Path(*Path(editor.file_name).parts[-2:])) if editor.file_name else resource
-        editor.ui.pointPreviewLabel.setText(f"Editing: {short_resource}")
-        editor.ui.pointPreviewLabel.setToolTip(f"{resource}\nEdits, Save and Undo apply to this sprite resource.")
+        if editor.frozen_preview:
+            editor.ui.pointPreviewLabel.setText(f"Snapshot: {self.label(editor)}")
+            editor.ui.pointPreviewLabel.setToolTip(f"Captured from {editor.frozen_origin_label}\nRead-only comparison. Later edits and saves do not change this snapshot.")
+        else:
+            editor.ui.pointPreviewLabel.setText(f"Editing: {short_resource}")
+            editor.ui.pointPreviewLabel.setToolTip(f"{resource}\nEdits, Save and Undo apply to this sprite resource.")
         timing = "Synced" if member.synchronized else "Independent"
         details = ["Main sprite", f"Timing: {timing}"]
         tooltip = [f"Main sprite: {self.label(self.root)}", f"Timeline: {timing.lower()}"]
         if member is not self.members[0]:
             details = [f"{member.parent_point or '?'} → {member.child_point or '?'}", f"Timing: {timing}"]
             tooltip[0] = f"{self.label(self.root)}.{member.parent_point or '?'} → {self.label(editor)}.{member.child_point or '?'}"
+            if member.separate_alignment:
+                details[0] = "Separate alignment"
+                tooltip[0] = "Separate viewport column; uses this sprite's own origin and offsets."
             follows = []
             if member.follow_facing:
                 follows.append("Facing")
@@ -236,8 +253,33 @@ class ActionPointPreview:
 
     def toggle_shadow(self, editor):
         member = self.member(editor)
-        member.shadow_visible = not member.shadow_visible
+        if member.separate_alignment:
+            member.standalone_shadow_visible = not member.standalone_shadow_visible
+        else:
+            member.shadow_visible = not member.shadow_visible
         self.refresh()
+
+    def set_separate_alignment(self, member, enabled):
+        member.separate_alignment = bool(enabled)
+        self.refresh()
+
+    def alignment_columns(self):
+        """The main assembly stays first; separate visible sprites follow tab order."""
+        return [self.members[0].identity, *(identity for identity in self.order
+                if any(m.identity == identity and m is not self.members[0]
+                       and m.separate_alignment and m.visible for m in self.members))]
+
+    def alignment_layout(self, viewer):
+        gl = viewer.openGLWidget
+        columns = self.alignment_columns()
+        center = gl.width() // 2
+        zoom = gl.camera.zoom
+        layout = []
+        for i, identity in enumerate(columns):
+            left, right = gl.width() * i // len(columns), gl.width() * (i + 1) // len(columns)
+            origin = center + ((left + right) // 2 - center) / zoom
+            layout.append((identity, left, right, Presentation((origin, gl.height() // 3), (viewer.scale, -viewer.scale))))
+        return layout
 
     def action_candidates(self, editor, requested):
         """An unlinked child shares the main rig's preview action conventions."""
@@ -314,18 +356,19 @@ class ActionPointPreview:
             self.update_label(member.editor)
             member.editor.openGLWidget.update()
 
-    def resolve(self, presentation=Presentation()):
+    def resolve(self, presentation=Presentation(), *, alignments=None):
         self.advance(0)
         results = {}
         parent = self.members[0]
         parent.warning = ""
+        alignments = alignments or {}
+        root_presentation = alignments.get(parent.identity, presentation)
+        root_sample = None
         if parent.frame is None:
             parent.warning = f"{self.label(self.root)}: no artwork for the selected action/direction."
-            for child in self.members[1:]:
-                child.warning = f"{self.label(self.root)}: no artwork for the selected action/direction."
-            return results
-        root_sample = sample_sprite(parent.identity, self.root, parent.frame, facing=parent.direction, presentation=presentation)
-        results[parent.identity] = (root_sample, presentation.point(root_sample.sprite_offset))
+        else:
+            root_sample = sample_sprite(parent.identity, self.root, parent.frame, facing=parent.direction, presentation=root_presentation)
+            results[parent.identity] = (root_sample, root_presentation.point(root_sample.sprite_offset))
         for child in self.members[1:]:
             child.warning = ""
             if child.frame is None:
@@ -338,8 +381,15 @@ class ActionPointPreview:
                 continue
             sample = sample_sprite(child.identity, child.editor, child.frame, facing=child.direction,
                                    presentation=Presentation(scale=presentation.scale))
-            if child.inherit_mirroring:
+            if child.inherit_mirroring and root_sample is not None:
                 sample = replace(sample, mirrored=bool(sample.mirrored) ^ bool(root_sample.mirrored))
+            if child.separate_alignment:
+                independent = alignments.get(child.identity, presentation)
+                results[child.identity] = (replace(sample, presentation=independent), independent.point(sample.sprite_offset))
+                continue
+            if root_sample is None:
+                child.warning = parent.warning
+                continue
             if not child.parent_point or not child.child_point:
                 child.warning = "Choose Action Point Relationship… on this preview tab."
                 continue
@@ -358,7 +408,7 @@ class ActionPointPreview:
         host = self.root.document_host
         for member in self.members:
             editor = member.editor
-            if not editor.file_name or Path(editor.file_name).suffix.lower() != ".json":
+            if editor.frozen_preview or not editor.file_name or Path(editor.file_name).suffix.lower() != ".json":
                 continue
             paths = [Path(editor.file_name), Path(editor.file_name).with_name(editor.texture_name)]
             try:
@@ -414,26 +464,51 @@ class ActionPointPreview:
         from preview import FORMAT, write_workspace
         from utils import FormatError
         try:
-            if any(not m.editor.file_name for m in self.members):
+            if any(not m.editor.file_name and not m.editor.frozen_preview for m in self.members):
                 msg = "Save each sprite resource before saving its preview references."
                 raise FormatError(msg)
-            default = str(Path(self.root.file_name).with_suffix(".preview.json"))
-            path, _ = QtWidgets.QFileDialog.getSaveFileName(self.root.window, "Save Editor Preview", default, "Editor Preview (*.preview.json)")
+            default = str(preview_save_path(self.file_path or Path(self.root.file_name).with_suffix(PREVIEW_SUFFIX)))
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(self.root.window, "Save Editor Preview", default, "Editor Preview (*.mdpreview)")
             if not path:
                 return False
-            if not path.lower().endswith(".preview.json"):
-                path += ".preview.json"
-            directory = Path(path).parent
+            path = preview_save_path(path).resolve()
+            directory = path.parent
             parts = []
             for member in self.members[1:]:
-                part = {name: getattr(member, name) for name in ("parent_point", "child_point", "follow_facing", "follow_action", "synchronized", "inherit_mirroring", "visible")}
-                part["sprite"] = relative_sprite_path(Path(member.editor.file_name), directory)
+                part = {name: getattr(member, name) for name in ("parent_point", "child_point", "follow_facing", "follow_action", "synchronized", "inherit_mirroring", "visible", "separate_alignment")}
+                editor = member.editor
+                if editor.frozen_preview:
+                    preview_key = str(Path(path).resolve())
+                    snapshot_directory = (directory / (Path(path).stem + ".editor")).resolve()
+                    snapshot_path = editor.frozen_export_paths.get(preview_key)
+                    if snapshot_path is None or not snapshot_path.resolve().is_relative_to(snapshot_directory):
+                        snapshot_path = snapshot_directory / editor.frozen_snapshot_id / "Sprite.json"
+                    document = editor._sprite_document()
+                    if editor._rig_profile_loaded is not None:
+                        import yaml
+                        from dataclasses import asdict
+                        rig_path = snapshot_path.with_name("Rig.yaml")
+                        rig_path.parent.mkdir(parents=True, exist_ok=True)
+                        rig_data = asdict(editor._rig_profile_loaded)
+                        rig_data["version"] = 1
+                        rig_path.write_text(yaml.safe_dump(rig_data, sort_keys=False), encoding="utf-8")
+                        document.rig_profile, document.rig_profile_id = rig_path, None
+                    else:
+                        document.rig_profile, document.rig_profile_id = None, None
+                    document.export(snapshot_path.parent, SheetFormat.NATIVE, filename=snapshot_path.name)
+                    editor.frozen_export_paths[preview_key] = snapshot_path
+                    part["sprite"] = relative_sprite_path(snapshot_path.resolve(), directory)
+                    part["frozen"] = True
+                else:
+                    part["sprite"] = relative_sprite_path(Path(editor.file_name), directory)
                 part["action"] = member.editor.current_anim_group.name if member.editor.current_anim_group else ""
                 part["name"] = member.display_name
                 parts.append(part)
             write_workspace(path, {"format": FORMAT, "version": 1, "root": relative_sprite_path(Path(self.root.file_name), directory),
                                     "root_visible": self.members[0].visible, "root_name": self.members[0].display_name,
                                     "parts": parts, "order": [next(i for i,m in enumerate(self.members) if m.identity == key) for key in self.order]})
+            self.file_path = path
+            self.root.add_recent_list(path)
             return True
         except (FormatError, OSError, ValueError) as error:
             self.root.create_error_popup(str(error))
@@ -449,6 +524,8 @@ class ActionPointPreview:
 
     def remove(self, editor):
         removing = list(self.members) if editor is self.root else [self.member(editor)]
+        snapshots = [member.editor for member in removing if member.editor.frozen_preview]
+        host = self.root.document_host
         # Context-owned sprites must be released before any document GL teardown.
         for viewer in list(self.views):
             self.release_view(viewer)
@@ -473,6 +550,12 @@ class ActionPointPreview:
             self.timer.deleteLater()
         else:
             self.refresh()
+        # Detach all members and release context-owned sprites before closing
+        # snapshot pages. A page already being disposed is absent from the host.
+        for snapshot in snapshots:
+            page = next((page for page, source in host._editors.items() if source is snapshot), None)
+            if page is not None:
+                host.close_document(host.documentTabs.indexOf(page))
 
     @staticmethod
     def restore_visibility(editor, shadow_visible):
@@ -485,8 +568,10 @@ class ActionPointPreview:
         """Draw in the viewer's GL context using resolver-derived positions."""
         gl = viewer.openGLWidget
         presentation = Presentation((gl.width() // 2, gl.height() // 3), (viewer.scale, -viewer.scale))
+        layout = self.alignment_layout(viewer)
+        alignments = {identity: transform for identity, _, _, transform in layout}
         try:
-            results = self.resolve(presentation)
+            results = self.resolve(presentation, alignments=alignments)
         finally:
             # Sampling can update other document controls and activate their GL
             # contexts. All cached sprites/VAOs below belong to this viewer,
@@ -502,7 +587,19 @@ class ActionPointPreview:
         for _, sprite in cache.values():
             sprite.visible = False
 
-        def draw(key, image_source, rows, columns, frame, position, mirrored, order, stamp, opacity=255, color=(255, 255, 255)):
+        column_groups = {}
+        if len(layout) > 1:
+            viewport = (pyglet.gl.GLint * 4)()
+            pyglet.gl.glGetIntegerv(pyglet.gl.GL_VIEWPORT, viewport)
+            for index, (identity, left, right, _) in enumerate(layout):
+                x1 = viewport[0] + round(left * viewport[2] / max(1, gl.width()))
+                x2 = viewport[0] + round(right * viewport[2] / max(1, gl.width()))
+                column_groups[identity] = PreviewColumnGroup((x1, viewport[1], x2-x1, viewport[3]), index)
+
+        def column_group(identity):
+            return column_groups.get(identity, column_groups.get(self.members[0].identity))
+
+        def draw(key, image_source, rows, columns, frame, position, mirrored, order, stamp, opacity=255, color=(255, 255, 255), *, identity=None):
             entry = cache.get(key)
             if entry is None or entry[0][0] != stamp:
                 if entry:
@@ -514,7 +611,7 @@ class ActionPointPreview:
                     raw = data.get_data("RGBA", -image_source.width * 4) if data else image_source.tobytes()
                     image = pyglet.image.ImageData(image_source.width, image_source.height, "RGBA", raw, pitch=-image_source.width * 4)
                     grid = TopLeftGrid(image, rows=rows, columns=columns)
-                sprite = pyglet.sprite.Sprite(grid[0], batch=gl.batch, group=pyglet.graphics.Group(20 + order))
+                sprite = pyglet.sprite.Sprite(grid[0], batch=gl.batch, group=pyglet.graphics.Group(20 + order, parent=column_group(identity)))
                 entry = cache[key] = ((stamp, grid), sprite)
             grid, sprite = entry[0][1], entry[1]
             image = grid[frame].get_texture()
@@ -525,7 +622,7 @@ class ActionPointPreview:
             sprite.image = image
             sprite.position = (*position, 0)
             sprite.scale = viewer.scale
-            sprite.group = pyglet.graphics.Group(20 + order)
+            sprite.group = pyglet.graphics.Group(20 + order, parent=column_group(identity))
             sprite.opacity = opacity
             sprite.color = color
             sprite.visible = True
@@ -536,8 +633,12 @@ class ActionPointPreview:
             for index, (neighbor, distance) in enumerate(viewer.onionPreviewNeighbors(member.frame)):
                 sample = sample_sprite(member.identity, viewer, neighbor, facing=member.direction,
                                        presentation=presentation if viewer is self.root else Presentation(scale=presentation.scale))
-                if viewer is self.root:
-                    origin = presentation.point(sample.sprite_offset)
+                if viewer is self.root or member.separate_alignment:
+                    ghost_presentation = alignments[member.identity]
+                    sample = replace(sample, presentation=ghost_presentation)
+                    if viewer is not self.root and member.inherit_mirroring and self.members[0].identity in results:
+                        sample = replace(sample, mirrored=bool(sample.mirrored) ^ bool(results[self.members[0].identity][0].mirrored))
+                    origin = ghost_presentation.point(sample.sprite_offset)
                 else:
                     parent = self.members[0]
                     parent_sample = results[parent.identity][0]
@@ -550,16 +651,17 @@ class ActionPointPreview:
                     origin = placement.artwork_origin
                 draw(("onion", member.identity, index), viewer.sheet_image, viewer.image_grid.rows,
                      viewer.image_grid.columns, sample.frame_index, origin, sample.mirrored, -19,
-                     id(viewer.sheet_image), round(viewer.onionOpacity / distance), (190, 190, 190))
-                if viewer.onion_shadows_enabled and member.shadow_visible:
+                     id(viewer.sheet_image), round(viewer.onionOpacity / distance), (190, 190, 190), identity=member.identity)
+                shadow_visible = member.standalone_shadow_visible if member.separate_alignment else member.shadow_visible
+                if viewer.onion_shadows_enabled and shadow_visible:
                     shadow_artwork = viewer._display_shadow_image()
-                    if viewer is self.root:
-                        shadow_position = presentation.point(neighbor.shadow_offset.data())
+                    if viewer is self.root or member.separate_alignment:
+                        shadow_position = ghost_presentation.point(neighbor.shadow_offset.data())
                     else:
                         shadow_position = placement.presentation.point(neighbor.shadow_offset.data())
                     draw(("onion-shadow", member.identity, index), shadow_artwork, 1, 1, 0,
                          shadow_position, False, -21, (viewer.shadow_size, id(shadow_artwork)),
-                         round(viewer.onionOpacity / distance))
+                         round(viewer.onionOpacity / distance), identity=member.identity)
 
         for order, identity in enumerate(self.order):
             member = next((m for m in self.members if m.identity == identity), None)
@@ -568,14 +670,15 @@ class ActionPointPreview:
                     continue
                 sample, origin = results[identity]
                 source = member.editor
-                if member.shadow_visible:
+                shadow_visible = member.standalone_shadow_visible if member.separate_alignment else member.shadow_visible
+                if shadow_visible:
                     shadow_artwork = source._display_shadow_image()
                     draw(("shadow", identity), shadow_artwork, 1, 1, 0,
                          sample.presentation.point(member.frame.shadow_offset.data()), False, -20,
-                         (source.shadow_size, id(shadow_artwork)), source.ui.shadowOpacitySlider.value())
+                         (source.shadow_size, id(shadow_artwork)), source.ui.shadowOpacitySlider.value(), identity=identity)
                 sprite = draw(identity, source.sheet_image, source.image_grid.rows, source.image_grid.columns,
                               sample.frame_index, origin, sample.mirrored, order, id(source.sheet_image),
-                              source.ui.spriteOpacitySlider.value())
+                              source.ui.spriteOpacitySlider.value(), identity=identity)
                 if source is viewer and viewer.sprite:
                     viewer.sprite.position = sprite.position
         member = next((m for m in self.members if m.editor is viewer), None)
@@ -585,7 +688,7 @@ class ActionPointPreview:
                 position = sample.rendered_point(name)
                 image = viewer.actionPointMarker(name)
                 draw(("point", name), image, 1, 1, 0, position, False,
-                     1000 + index, id(image), viewer.ui.actionPointsOpacitySlider.value())
+                     1000 + index, id(image), viewer.ui.actionPointsOpacitySlider.value(), identity=member.identity)
         self.update_label(viewer)
 
 
@@ -611,6 +714,10 @@ class RelationshipDialog(ScreenFitDialog):
             body = editor.action_points.get(state.frame.frame_index) if state.frame else None
             for name in names:
                 combo.addItem(name + (" (unset)" if body is None or body.get(name) is None else ""), name)
+            combo.addItem("Shadow Point", SHADOW_ANCHOR)
+            combo.setItemData(combo.count() - 1,
+                              "Uses this animation entry's Shadow Offset, even when the shadow is hidden. Artwork mirroring and Sprite Offset do not move it.",
+                              QtCore.Qt.ItemDataRole.ToolTipRole)
             default = editor.ui.actionPointComboBox.currentData()
             if combo is self.parent_point and body is not None and body.get("center") is not None:
                 default = "center"
@@ -628,7 +735,7 @@ class RelationshipDialog(ScreenFitDialog):
         self.inherit_mirroring = QtWidgets.QCheckBox("Mirror artwork with parent (separate from facing)")
         self.inherit_mirroring.setChecked(member.inherit_mirroring)
         layout.addRow(self.inherit_mirroring)
-        note = QtWidgets.QLabel("Temporary preview binding. Coordinates are edited and saved on each sprite using its Action Points panel.")
+        note = QtWidgets.QLabel("Temporary preview binding. Named points use the sprite's Action Points; Shadow Point uses its animation entry's Shadow Offset.")
         note.setWordWrap(True)
         layout.addRow(note)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
@@ -648,6 +755,53 @@ class RelationshipDialog(ScreenFitDialog):
                           follow_facing=self.follow_facing.isChecked(), follow_action=self.follow_action.isChecked(),
                           synchronized=self.synchronized.isChecked(), inherit_mirroring=self.inherit_mirroring.isChecked())
         super().accept()
+
+
+def duplicate_frozen_preview(source):
+    """Capture current in-memory data into a private, read-only comparison editor."""
+    if source.image_grid is None or source.frozen_preview:
+        return None
+    preview = source.point_preview
+    if preview is not None and len(preview.members) >= 11:
+        return None
+    document = copy.deepcopy(source._sprite_document())
+    name = ActionPointPreview.label(source)
+    host = source.document_host
+    frozen = host.create_frozen_document(document, name, source_label=source.file_name or ActionPointPreview.label(source))
+    frozen._rig_profile_loaded = copy.deepcopy(source._rig_profile_loaded)
+    action = source.current_anim_group.name if source.current_anim_group else None
+    item = next((item for item in frozen._get_action_list_items() if item.anim_group.name == action), None)
+    if item is not None:
+        frozen.ui.actionListWidget.setCurrentItem(item)
+        item.mouseClickEvent(None)
+    frozen.set_direction(source.current_direction)
+    frame = source.displayed_anim_frame or source.current_anim_frame
+    if frame is not None and frozen.current_sequence and frozen.current_sequence.frames:
+        frozen.ui.frameSlider.setValue(min(frame.idx, len(frozen.current_sequence.frames)-1))
+    frozen.ui.previewShadowCheckBox.setChecked(source.ui.previewShadowCheckBox.isChecked())
+    frozen.ui.spriteOpacitySlider.setValue(source.ui.spriteOpacitySlider.value())
+    frozen.ui.shadowOpacitySlider.setValue(source.ui.shadowOpacitySlider.value())
+    if preview is None:
+        preview = ActionPointPreview(source)
+    member = preview.add_sprite(frozen)
+    member.display_name = frozen.untitled_name
+    member.separate_alignment = True
+    member.follow_action = True
+    member.synchronized = True
+    if source is not preview.root:
+        original = preview.member(source)
+        member.parent_point, member.child_point = original.parent_point, original.child_point
+        member.follow_facing = original.follow_facing
+        member.follow_action = original.follow_action
+        member.synchronized = original.synchronized
+        member.inherit_mirroring = original.inherit_mirroring
+        member.playing = original.playing
+        member.ticks = original.ticks
+    for participant in preview.members:
+        participant.editor.workspace.set_visible(True)
+    preview.select(member.identity)
+    preview.refresh()
+    return member
 
 
 def add_sprite_preview(root, path=None):
@@ -706,7 +860,15 @@ def load_preview(host, path, *, add_to_recent=True):
             raise FormatError(msg)
     if current:
         current.remove(current.root)
-    editors = [host.open_file(source, add_to_recent=False) for source in paths]
+    editors = [host.open_file(paths[0], add_to_recent=False)]
+    for source, document, part in zip(paths[1:], documents[1:], data["parts"]):
+        if part.get("frozen", False):
+            editor = host.create_frozen_document(document, part.get("name") or source.stem,
+                                                 source_label=str(source), saved_name=bool(part.get("name")))
+            editor.frozen_export_paths[str(path)] = source
+        else:
+            editor = host.open_file(source, add_to_recent=False)
+        editors.append(editor)
     if any(e is None for e in editors):
         msg = "Could not open all preview resources"
         raise FormatError(msg)
@@ -716,8 +878,8 @@ def load_preview(host, path, *, add_to_recent=True):
     try:
         for editor, part in zip(editors[1:], data["parts"]):
             member = preview.add_sprite(editor, parent_point=part["parent_point"], child_point=part["child_point"])
-            member.display_name = part.get("name", "")
-            for flag in ("follow_facing", "follow_action", "synchronized", "inherit_mirroring", "visible"):
+            member.display_name = editor.untitled_name if editor.frozen_preview else part.get("name", "")
+            for flag in ("follow_facing", "follow_action", "synchronized", "inherit_mirroring", "visible", "separate_alignment"):
                 if flag in part:
                     setattr(member, flag, part[flag])
             action = part.get("action")
@@ -735,6 +897,7 @@ def load_preview(host, path, *, add_to_recent=True):
             editor.workspace.set_visible(True)
         preview.select(preview.members[0].identity)
         preview.refresh()
+        preview.file_path = path
         if add_to_recent:
             preview.root.add_recent_list(path)
         return preview
@@ -744,7 +907,7 @@ def load_preview(host, path, *, add_to_recent=True):
 
 
 def load_preview_dialog(editor):
-    path, _ = QtWidgets.QFileDialog.getOpenFileName(editor.window, "Load Editor Preview", str(Path(editor.file_name).with_suffix(".preview.json")) if editor.file_name else "", "Editor Preview (*.preview.json)")
+    path, _ = QtWidgets.QFileDialog.getOpenFileName(editor.window, "Load Editor Preview", str(Path(editor.file_name).with_suffix(PREVIEW_SUFFIX)) if editor.file_name else "", PREVIEW_FILTER)
     if path:
         try:
             load_preview(editor.document_host, path)

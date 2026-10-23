@@ -204,6 +204,8 @@ def plan_builds(source: str | Path, destination: str | Path) -> list[BuildJob]:
     priority = {"sprite.json": 0, "framedata.xml": 1, "animdata.xml": 2}
     preferred: dict[Path, Path] = {}
     for path in source.rglob("*"):
+        if any(part.endswith(".editor") for part in path.relative_to(root).parts):
+            continue
         if path.name.casefold() not in priority or path.is_symlink() or not path.is_file():
             continue
         previous = preferred.get(path.parent)

@@ -129,6 +129,34 @@ def create_point_marker(size: int, color: tuple[int, int, int, int]) -> ImageDat
 
 
 
+class PreviewColumnGroup(pyglet.graphics.Group):
+    """Clip a preview column in framebuffer pixels, independently of camera zoom."""
+
+    def __init__(self, rectangle, order):
+        super().__init__(order)
+        self.rectangle = rectangle
+
+    def __eq__(self, other):
+        return type(self) is type(other) and self.order == other.order and self.rectangle == other.rectangle
+
+    def __hash__(self):
+        return hash((type(self), self.order, self.rectangle))
+
+    def set_state(self):
+        gl = pyglet.gl
+        self._previous_enabled = gl.glIsEnabled(gl.GL_SCISSOR_TEST)
+        self._previous_box = (gl.GLint * 4)()
+        gl.glGetIntegerv(gl.GL_SCISSOR_BOX, self._previous_box)
+        gl.glEnable(gl.GL_SCISSOR_TEST)
+        gl.glScissor(*self.rectangle)
+
+    def unset_state(self):
+        gl = pyglet.gl
+        gl.glScissor(*self._previous_box)
+        if not self._previous_enabled:
+            gl.glDisable(gl.GL_SCISSOR_TEST)
+
+
 class QtPygletContext(pyglet.gl.base.Context):
     """Track pyglet objects in the native context owned by Qt."""
 
@@ -348,9 +376,9 @@ class PygletWidget(QOpenGLWidget):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
         self._update_camera_focus()
+        self.editor.updateLayerPreview()
         self._update_guide_lines()
         self._update_sprite_bounds()
-        self.editor.updateLayerPreview()
         with self.camera:
             self.batch.draw()
 
@@ -358,7 +386,8 @@ class PygletWidget(QOpenGLWidget):
         if not self.cameraLocked:
             self.camera.x = self.width() // 2 + self.panOffset.x()
             self.camera.y = self.height() // 3 + self.panOffset.y()
-        elif self.camera.zoom > 1 and self.editor.sprite is not None:
+        elif (self.camera.zoom > 1 and self.editor.sprite is not None
+              and not (self.editor.point_preview and len(self.editor.point_preview.alignment_columns()) > 1)):
             self.camera.x, self.camera.y = self.editor.sprite.position[:2]
         else:
             self.camera.x = self.width() // 2
@@ -372,14 +401,27 @@ class PygletWidget(QOpenGLWidget):
         # This way origin spans the view at every zoom level.
         left = self.camera.x - (self.width() // 2) / zoom
         bottom = self.camera.y - (self.height() // 3) / zoom
-        horizontal, vertical = self.lines
+        preview = self.editor.point_preview
+        origins = ([transform.position[0] for _, _, _, transform in preview.alignment_layout(self.editor)]
+                   if preview and len(preview.alignment_columns()) > 1 else [self.width() // 2])
+        while len(self.lines) < len(origins) + 1:
+            self.lines.append(pyglet.shapes.Line(0, 0, 0, 0, batch=self.batch))
+        while len(self.lines) > len(origins) + 1:
+            self.lines.pop().delete()
+        horizontal = self.lines[0]
         horizontal.position = (left - 1 / zoom, self.height() // 3)
         horizontal.x2 = left + (self.width() + 1) / zoom
         horizontal.y2 = self.height() // 3
-        vertical.position = (self.width() // 2, bottom - 1 / zoom)
-        vertical.x2 = self.width() // 2
-        vertical.y2 = bottom + (self.height() + 1) / zoom
-        horizontal.width = vertical.width = 1 / zoom
+        horizontal.width = 1 / zoom
+        for index, (vertical, origin) in enumerate(zip(self.lines[1:], origins)):
+            vertical.position = (origin, bottom - 1 / zoom)
+            vertical.x2 = origin
+            vertical.y2 = bottom + (self.height() + 1) / zoom
+            vertical.width = 1 / zoom
+            screen_x = (origin - self.camera.x) * zoom + self.width() // 2
+            vertical.visible = (len(origins) == 1
+                                or self.width() * index // len(origins) <= screen_x
+                                < self.width() * (index + 1) // len(origins))
 
     def _update_sprite_bounds(self) -> None:
         sprite = self.editor.sprite
@@ -400,6 +442,14 @@ class PygletWidget(QOpenGLWidget):
         zoom = self.camera.zoom
         viewport = (pyglet.gl.GLint * 4)()
         pyglet.gl.glGetIntegerv(pyglet.gl.GL_VIEWPORT, viewport)
+        preview = self.editor.point_preview
+        parent_group = None
+        if preview and len(preview.alignment_columns()) > 1:
+            member = preview.member(self.editor)
+            entry = preview.views.get(self.editor, {}).get(member.identity)
+            if entry is not None:
+                parent_group = entry[1].group.parent
+        self.spriteBounds.group = pyglet.graphics.Group(100, parent=parent_group)
         scale_x = viewport[2] / max(1, self.width())
         scale_y = viewport[3] / max(1, self.height())
         zoom_x, zoom_y = zoom * scale_x, zoom * scale_y

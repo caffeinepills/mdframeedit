@@ -17,6 +17,22 @@ if TYPE_CHECKING:
     from conversion import SpriteDocument
     from data import AnimFrame
 
+PREVIEW_SUFFIX = ".mdpreview"
+PREVIEW_FILTER = "Editor Preview (*.mdpreview)"
+SHADOW_ANCHOR = "@shadow"
+
+
+def is_preview_path(path) -> bool:
+    return str(path).lower().endswith(PREVIEW_SUFFIX)
+
+
+def preview_save_path(path) -> Path:
+    """Ensure preview saves use the explicit extension."""
+    path = Path(path)
+    if path.suffix.lower() != PREVIEW_SUFFIX:
+        return path.with_name(path.name + PREVIEW_SUFFIX)
+    return path
+
 def sample_sequence(frames, ticks):
     """Sample the displayed entry at an explicit elapsed tick; empty is hidden."""
     if not isfinite(ticks):
@@ -106,6 +122,7 @@ class SpriteSample:
     mirrored: bool = False
     facing: int = 0
     presentation: Presentation = field(default_factory=Presentation)
+    shadow_offset: Vector = (0, 0)
 
     def __post_init__(self):
         if not isinstance(self.instance_id, str) or not self.instance_id.strip():
@@ -136,6 +153,7 @@ class SpriteSample:
         object.__setattr__(self, "frame_size", size)
         object.__setattr__(self, "action_points", MappingProxyType(points))
         object.__setattr__(self, "sprite_offset", _vector(self.sprite_offset, "sprite_offset"))
+        object.__setattr__(self, "shadow_offset", _vector(self.shadow_offset, "shadow_offset"))
 
     def artwork_point(self, point: Vector) -> Vector:
         """Mirror within the logical cell, without mirroring animation offsets."""
@@ -145,13 +163,20 @@ class SpriteSample:
             x = width - 1 - 2 * (width // 2) - x
         return x, y
 
-    def rendered_point(self, name: str) -> Vector | None:
-        """Current point in presentation space; unset returns None, never zero."""
+    def local_point(self, name: str) -> Vector | None:
+        """Anchor before presentation; the shadow follows its own entry offset."""
+        if name == SHADOW_ANCHOR:
+            return self.shadow_offset
         point = self.action_points.get(name)
         if point is None:
             return None
         x, y = self.artwork_point(point)
-        return self.presentation.point((x + self.sprite_offset[0], y + self.sprite_offset[1]))
+        return x + self.sprite_offset[0], y + self.sprite_offset[1]
+
+    def rendered_point(self, name: str) -> Vector | None:
+        """Current point in presentation space; unset returns None, never zero."""
+        point = self.local_point(name)
+        return self.presentation.point(point) if point is not None else None
 
 
 def sample_sprite(instance_id: str, resource: SpriteDocument, frame: AnimFrame, *,
@@ -171,7 +196,8 @@ def sample_sprite(instance_id: str, resource: SpriteDocument, frame: AnimFrame, 
     body = resource.action_points.get(frame.frame_index)
     points = {name: point.data() for name, point in body.items()} if body is not None else {}
     return SpriteSample(instance_id, (resource.frame_width, resource.frame_height), frame.frame_index,
-                        points, frame.sprite_offset.data(), bool(frame.flip), facing, presentation)
+                        points, frame.sprite_offset.data(), bool(frame.flip), facing, presentation,
+                        frame.shadow_offset.data())
 
 
 @dataclass(frozen=True)
@@ -225,19 +251,17 @@ def resolve_relationship(relationship: ActionPointRelationship, parent: SpriteSa
     if target is None:
         return ResolutionFailure("parent_point_unset", parent.instance_id, relationship.parent_point,
                                  f"Parent Action Point {relationship.parent_point!r} is unset on sheet frame {parent.frame_index}.")
-    point = child.action_points.get(relationship.child_point)
-    if point is None:
+    local_point = child.local_point(relationship.child_point)
+    if local_point is None:
         return ResolutionFailure("child_point_unset", child.instance_id, relationship.child_point,
                                  f"Child Action Point {relationship.child_point!r} is unset on sheet frame {child.frame_index}.")
-    px, py = child.artwork_point(point)
-    local_point = (px + child.sprite_offset[0], py + child.sprite_offset[1])
     x, y = child.presentation.vector(local_point)
     placed = Presentation((target[0] - x, target[1] - y), child.presentation.scale)
     return ResolvedPlacement(placed, target, placed.point(local_point), placed.point(child.sprite_offset))
 
 
 FORMAT = "mdframeedit-preview"
-FLAGS = ("follow_facing", "follow_action", "synchronized", "inherit_mirroring", "visible")
+FLAGS = ("follow_facing", "follow_action", "synchronized", "inherit_mirroring", "visible", "separate_alignment", "frozen")
 # Existing previews can retain this obsolete label flag; it has no effect.
 LEGACY_FLAGS = ("reference_only",)
 
@@ -284,7 +308,9 @@ def validate_workspace(data):
         if isinstance(part,dict) and set(part)-{"sprite","parent_point","child_point","action","name",*FLAGS,*LEGACY_FLAGS}:
             msg = "Unknown preview part field"
             raise FormatError(msg)
-        if not isinstance(part, dict) or any(not isinstance(part.get(k), str) or not part[k] for k in ("sprite", "parent_point", "child_point")):
+        if (not isinstance(part, dict) or not isinstance(part.get("sprite"), str) or not part["sprite"]
+                or any(not isinstance(part.get(k), str) or (not part[k] and not part.get("separate_alignment"))
+                       for k in ("parent_point", "child_point"))):
             msg = "Preview parts need sprite paths and named Action Points"
             raise FormatError(msg)
         if any(k in part and type(part[k]) is not bool for k in (*FLAGS, *LEGACY_FLAGS)):

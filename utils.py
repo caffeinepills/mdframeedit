@@ -38,7 +38,7 @@ def write_xml(
         if encoding:
             tree.write(file_name, encoding="utf-8", xml_declaration=True)
         else:
-            output.write(b'<?xml version="1.0" ?>\n')
+            output.write(b'<?xml version="1.0"?>\n')
             tree.write(output, encoding="utf-8", xml_declaration=False)
 
 

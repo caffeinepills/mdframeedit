@@ -49,6 +49,7 @@ from data import (
 )
 from formats import SpriteFormat, validate_export
 from formats.native import read_texture_layout
+from preview import is_preview_path
 from formats.packing import TextureLayout, unpack_texture
 from gui.batch import ActionAliasDialog, BatchEditDialog
 from gui.editor import Ui_MainWindow
@@ -128,6 +129,8 @@ def undoable(text: str) -> Callable[
     def decorate(method: Callable[..., EditResult]) -> Callable[..., EditResult]:
         @wraps(method)
         def record(editor: AnimationEditor, *args: object, **kwargs: object) -> EditResult:
+            if editor.frozen_preview:
+                return None
             if editor.sheet_format is None or editor.editDepth or editor.restoringEdit:
                 return method(editor, *args, **kwargs)
             if getattr(editor, "point_preview", None) is not None:
@@ -292,6 +295,8 @@ class AnimationEditor(AnimationSerialization):
         self.file_name = ""
         self.source_image_path: pathlib.Path | None = None
         self.texture_name = "Anim.png"
+        self.frozen_preview = False
+        self.frozen_export_paths = {}
         self.sheet_format: SheetFormat | str | None = None
         self.shadow_size_present = True
         self.loaded_shadow_size = 0
@@ -372,7 +377,7 @@ class AnimationEditor(AnimationSerialization):
             window.menuBar().addMenu(self.editMenu)
 
         self.settings = QSettings("MDFrameEditor", "Frame Editor")
-        self.recent_files: list[str] = self.settings.value("recent", [], list)
+        self._read_recent_files()
         self.artworkPath: pathlib.Path | None = None
         # Hash for file change.
         self.artworkDigest: bytes | None = None
@@ -406,14 +411,17 @@ class AnimationEditor(AnimationSerialization):
         self.ui.actionExit.triggered.connect(lambda: self.exit_application())
 
         self.recentFileActions: list[QtGui.QAction] = []
+        self.recent_preview_actions: list[QtGui.QAction] = []
 
-        for i in range(self.MAX_RECENT):
-            action = QtGui.QAction(self.window, visible=False)
-            action.triggered.connect(
-                lambda checked=False, a=action: self.load_recent_file(a)
-            )
-            self.recentFileActions.append(action)
-            self.ui.menuRecent.addAction(action)
+        for actions, menu in ((self.recentFileActions, self.ui.menuRecent),
+                              (self.recent_preview_actions, self.ui.menuRecentPreviews)):
+            for i in range(self.MAX_RECENT):
+                action = QtGui.QAction(self.window, visible=False)
+                action.triggered.connect(
+                    lambda checked=False, a=action: self.load_recent_file(a)
+                )
+                actions.append(action)
+                menu.addAction(action)
 
         self._update_recent_actions()
 
@@ -684,6 +692,8 @@ class AnimationEditor(AnimationSerialization):
         self.refreshRigProfile(force=True)
 
     def refreshRigProfile(self, *, force=False):
+        if self.frozen_preview:
+            return
         from project import load_rig_profile
         path = self.rig_profile
         try:
@@ -847,6 +857,8 @@ class AnimationEditor(AnimationSerialization):
             self._add_frames_from_grid()
 
     def resizeFrameCells(self, width: int, height: int, *, centerArtwork: bool = False) -> bool:
+        if self.frozen_preview:
+            return False
         if (width, height) == (self.frame_width, self.frame_height) and not centerArtwork:
             return False
         before = self.captureEditState()
@@ -1055,6 +1067,8 @@ class AnimationEditor(AnimationSerialization):
         )
 
     def setArtworkReloadEnabled(self, enabled: bool) -> None:
+        if self.frozen_preview:
+            enabled = False
         if self.artworkReloadEnabled == enabled:
             return
         self.artworkReloadEnabled = enabled
@@ -1159,6 +1173,8 @@ class AnimationEditor(AnimationSerialization):
         self.ui.statusBar.showMessage("Artwork reloaded.", 3000)
 
     def beginPointDrag(self) -> None:
+        if self.frozen_preview:
+            return
         if self.point_preview is not None:
             self.point_preview.pause_for_edit(self)
         index = self.selected_sheet_frame
@@ -1462,6 +1478,8 @@ class AnimationEditor(AnimationSerialization):
                     self.set_animation()
 
     def save_action_trigger(self) -> bool:
+        if self.frozen_preview:
+            return False
         if self.sheet_format is None:
             return False
         if self.sheet_format != SheetFormat.NATIVE or not self.file_name:
@@ -1469,6 +1487,8 @@ class AnimationEditor(AnimationSerialization):
         return self._save_document(self.file_name)
 
     def save_as_action_trigger(self) -> bool:
+        if self.frozen_preview:
+            return False
         if self.sheet_format is not None:
             if self.file_name:
                 suggested = pathlib.Path(self.file_name)
@@ -1489,6 +1509,8 @@ class AnimationEditor(AnimationSerialization):
         return False
 
     def _save_document(self, file_name: str | PathLike[str]) -> bool:
+        if self.frozen_preview:
+            return False
         if not file_name:
             return False
         target = pathlib.Path(file_name)
@@ -1892,33 +1914,49 @@ class AnimationEditor(AnimationSerialization):
         if item:
             self._move_frame(1)
 
+    def _read_recent_files(self) -> None:
+        """Partition the old mixed history and retain independent capped histories."""
+        sprites, previews = [], []
+        seen = set()
+        for key in ("recent_sprites", "recent_previews", "recent"):
+            for path in self.settings.value(key, [], list):
+                if not isinstance(path, str) or not path:
+                    continue
+                identity = os.path.normcase(os.path.realpath(path))
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                (previews if is_preview_path(path) else sprites).append(path)
+        self.recent_files = sprites[:self.MAX_RECENT]
+        self.recent_preview_files = previews[:self.MAX_RECENT]
+        self.settings.setValue("recent_sprites", self.recent_files)
+        self.settings.setValue("recent_previews", self.recent_preview_files)
+        self.settings.remove("recent")
+
     def add_recent_list(self, path: str | PathLike[str]) -> None:
-        path = str(path)
-        if self.document_host:
-            self.recent_files = self.settings.value("recent", [], list)
-        # Push to top.
-        try:
-            self.recent_files.remove(path)
-        except ValueError:
-            pass
-
-        self.recent_files.insert(0, path)
-
-        self.recent_files = self.recent_files[: self.MAX_RECENT]
-
-        self.settings.setValue("recent", self.recent_files)
-
+        path = str(pathlib.Path(path).resolve())
+        self._read_recent_files()
+        key = "recent_previews" if is_preview_path(path) else "recent_sprites"
+        entries = self.recent_preview_files if is_preview_path(path) else self.recent_files
+        identity = os.path.normcase(os.path.realpath(path))
+        entries = [path, *(entry for entry in entries if os.path.normcase(os.path.realpath(entry)) != identity)]
+        self.settings.setValue(key, entries[:self.MAX_RECENT])
+        self._read_recent_files()
         self._update_recent_actions()
         if self.document_host:
             self.document_host.refresh_recent_files()
 
     def _update_recent_actions(self) -> None:
-        recent_count = min(len(self.recent_files), self.MAX_RECENT)
-        paths = [pathlib.Path(path) for path in self.recent_files[:recent_count]]
+        self._populate_recent_actions(self.recent_files, self.recentFileActions)
+        self._populate_recent_actions(self.recent_preview_files, self.recent_preview_actions)
+
+    def _populate_recent_actions(self, entries, actions) -> None:
+        recent_count = min(len(entries), self.MAX_RECENT)
+        paths = [pathlib.Path(path) for path in entries[:recent_count]]
 
         for i in range(recent_count):
-            action = self.recentFileActions[i]
-            path = self.recent_files[i]
+            action = actions[i]
+            path = entries[i]
             parts = paths[i].parts
             # Include only enough parent folders to distinguish matching names.
             depth = 1
@@ -1935,7 +1973,7 @@ class AnimationEditor(AnimationSerialization):
             action.setData(path)
 
         for m in range(recent_count, self.MAX_RECENT):
-            self.recentFileActions[m].setVisible(False)
+            actions[m].setVisible(False)
 
     @undoable("Delete Action")
     def delete_action(self) -> None:
@@ -3043,6 +3081,8 @@ class AnimationEditor(AnimationSerialization):
         format_name: SheetFormat | SpriteFormat,
         xml_name: str | None = None,
     ) -> bool:
+        if self.frozen_preview:
+            return False
         try:
             if self.image_grid is None:
                 raise FormatError("No sprite data to save.")
@@ -3370,9 +3410,61 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         self.documentTabs.setCurrentWidget(page)
         return editor
 
+    def create_frozen_document(self, document: SpriteDocument, name: str, *, source_label: str = "", saved_name: bool = False) -> AnimationEditor:
+        """Install an independent, fileless comparison with no authoring or reloads."""
+        import re
+        from uuid import uuid4
+        used = {self.documentTabs.tabText(i).casefold() for i in range(self.documentTabs.count())}
+        legacy = re.fullmatch(r"(.*) \((?:Snapshot|Frozen)\)(?: \((\d+)\))?", name) if saved_name else None
+        if legacy:
+            base = legacy[1]
+            suffix = int(legacy[2]) + 1 if legacy[2] else 1
+            name = base + " " + "^" * suffix
+        elif saved_name:
+            base = name.rstrip("^").rstrip()
+            suffix = len(name) - len(name.rstrip("^"))
+        else:
+            base, suffix = name, 1
+            name = base + " ^"
+        while name.casefold() in used:
+            suffix += 1
+            name = base + " " + "^" * suffix
+        page, editor = self._create_document()
+        try:
+            editor._install_sprite_document(copy.deepcopy(document), add_to_recent=False)
+            if editor.groups:
+                editor.ui.actionListWidget.setCurrentRow(0)
+                editor.ui.actionListWidget.item(0).mouseClickEvent(None)
+            editor.frozen_preview = True
+            editor.frozen_snapshot_id = uuid4().hex
+            editor.frozen_origin_label = source_label
+            editor.untitled_name = name
+            editor.setArtworkReloadEnabled(False)
+            # Disable authoring containers so selection updates cannot re-enable edits.
+            for widget in (editor.ui.actionPointsGroupBox, editor.ui.groupBox_7,
+                           editor.ui.frameDataPanel, editor.ui.shadowSizeComboBox,
+                           editor.ui.sheetFramePicture, editor.ui.actionAddButton,
+                           editor.ui.actionDuplicateButton, editor.ui.actionDeleteButton,
+                           editor.ui.pasteSequenceButton, editor.ui.hitPointButton,
+                           editor.ui.returnPointButton, editor.ui.rushPointButton,
+                           *editor.ui.sequenceButtonWidgets):
+                widget.setEnabled(False)
+            editor.editMenu.setEnabled(False)
+            for action in (editor.ui.actionSave, editor.ui.actionSave_As,
+                           editor.ui.actionExportAll_Animations, editor.ui.actionExportSingle_Animation):
+                action.setEnabled(False)
+            self._saved_states[page] = self._document_state(editor)
+            self.documentTabs.addTab(page, name)
+            self.documentTabs.setCurrentWidget(page)
+            self._update_tab(page)
+            return editor
+        except Exception:
+            self._dispose_document(page)
+            raise
+
     def open_files_dialog(self) -> list[AnimationEditor]:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Open Sprites", "", "Sprite Files (*.json *.xml)"
+            self, "Open Sprites and Previews", "", "Sprites and Previews (*.json *.xml *.mdpreview);;Sprite Files (*.json *.xml);;Editor Previews (*.mdpreview)"
         )
         return self.open_files(paths)
 
@@ -3440,7 +3532,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
 
     def open_file(self, path: str | PathLike[str], *, add_to_recent: bool = True) -> AnimationEditor | None:
         path = str(pathlib.Path(path).resolve())
-        if path.lower().endswith(".preview.json"):
+        if is_preview_path(path):
             from gui.point_preview import load_preview
             try:
                 return load_preview(self, path, add_to_recent=add_to_recent).root
@@ -3490,7 +3582,8 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         if index >= 0:
             if not editor.file_name:
                 self.documentTabs.setTabText(index, getattr(editor, "untitled_name", "Untitled"))
-                self.documentTabs.setTabToolTip(index, "Unsaved sprite")
+                self.documentTabs.setTabToolTip(index, ("Snapshot (read-only): " + editor.frozen_origin_label)
+                                               if editor.frozen_preview else "Unsaved sprite")
                 if editor is self.current_editor:
                     self._update_window_title()
                 return
@@ -3574,7 +3667,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
 
     def refresh_recent_files(self) -> None:
         for editor in self._editors.values():
-            editor.recent_files = editor.settings.value("recent", [], list)
+            editor._read_recent_files()
             editor._update_recent_actions()
 
     def can_save_path(self, editor: AnimationEditor, path: str | PathLike[str]) -> bool:
@@ -3601,11 +3694,15 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
 
 
     def spriteContentChanged(self, editor: AnimationEditor) -> bool:
+        if editor.frozen_preview:
+            return False
         page = next(page for page, other in self._editors.items() if other is editor)
         return self._saved_states[page] != self._document_state(editor)
 
     def _confirm_close(self, page: QtWidgets.QWidget) -> bool:
         editor = self._editors[page]
+        if editor.frozen_preview:
+            return True
         if editor.sheet_format is None or (editor.file_name and self._saved_states.get(
             page
         ) == self._document_state(editor)):
@@ -3681,7 +3778,8 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         self.menuBar().clear()
         self._active_editor = None
         for page in list(self._editors):
-            self._dispose_document(page)
+            if page in self._editors:
+                self._dispose_document(page)
         super().closeEvent(event)
 
 

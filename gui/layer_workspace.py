@@ -144,9 +144,11 @@ class LayerWorkspace:
 
     def set_visible(self, visible):
         self.visible = visible
+        # Populate before showing: an empty QTabBar has zero height, which Qt
+        # can cache for the header while a new document page is still hidden.
+        self._refresh_tabs()
         for header in self.headers:
             header.setVisible(visible)
-        self._refresh_tabs()
 
     def _refresh_tabs(self):
         preview = self.root.point_preview
@@ -213,8 +215,14 @@ class LayerWorkspace:
             self.select_tab(tabs, tabs.currentIndex())
 
     def tab_menu(self, tabs, index):
-        if index < 0 or not self.root.point_preview:
+        if index < 0 or tabs.tabData(index) == ADD_LAYER_TAB:
             return None
+        from gui.point_preview import duplicate_frozen_preview
+        if not self.root.point_preview:
+            menu = QtWidgets.QMenu(tabs)
+            duplicate = menu.addAction("Create Snapshot", lambda: duplicate_frozen_preview(self.root))
+            duplicate.setEnabled(self.root.image_grid is not None and not self.root.frozen_preview)
+            return menu
         preview = self.root.point_preview
         member = next((m for m in preview.members if m.identity == tabs.tabData(index)), None)
         if member is None:
@@ -225,7 +233,14 @@ class LayerWorkspace:
         visible.setChecked(member.visible)
         visible.toggled.connect(lambda value: (setattr(member, "visible", value), preview.refresh()))
         menu.addAction("Rename Preview Tab…", lambda: self.rename_member(preview, member))
+        duplicate = menu.addAction("Create Snapshot", lambda: duplicate_frozen_preview(member.editor))
+        duplicate.setEnabled(not member.editor.frozen_preview and len(preview.members) < 11)
         if member is not preview.members[0]:
+            separate = menu.addAction("Separate Alignments")
+            separate.setCheckable(True)
+            separate.setChecked(member.separate_alignment)
+            separate.setToolTip("Show this sprite at its own origin in a separate viewport column.")
+            separate.toggled.connect(lambda value: preview.set_separate_alignment(member, value))
             menu.addAction("Action Point Relationship…", lambda: self.configure_relationship(member))
         menu.addSeparator()
         menu.addAction("End Preview" if member is preview.members[0] else "Remove from Preview", lambda: preview.remove(member.editor))

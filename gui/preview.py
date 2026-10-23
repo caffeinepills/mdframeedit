@@ -549,7 +549,7 @@ class PygletWidget(QOpenGLWidget):
                     remember_texture(getattr(image, name, None))
                     if hasattr(image, name):
                         setattr(image, name, None)
-        for sprite in (editor.sprite, editor.shadow, *editor.ap_sprites, *editor.onionSprites):
+        for sprite in (editor.sprite, editor.shadow, *editor.ap_sprites, *editor.onionSprites, *editor.onion_shadow_sprites):
             if sprite is not None:
                 remember_texture(sprite.image)
                 sprite.delete()
@@ -558,6 +558,7 @@ class PygletWidget(QOpenGLWidget):
         editor.shadow_point = None
         editor.ap_sprites.clear()
         editor.onionSprites.clear()
+        editor.onion_shadow_sprites.clear()
         for line in self.lines:
             line.delete()
         self.lines.clear()

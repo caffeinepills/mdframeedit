@@ -479,6 +479,8 @@ class AnimationEditor(AnimationSerialization):
         self.current_anim_frame: AnimFrame | None = None
         self.displayed_anim_frame: AnimFrame | None = None
         self.onionSprites: list[pyglet.sprite.Sprite] = []
+        self.onion_shadow_sprites: list[pyglet.sprite.Sprite] = []
+        self.onion_shadows_enabled = self.settings.value("preferences/onionShadows", False, bool)
         self.onionPreviewEnabled = self.settings.value("preferences/onionPreview", False, bool)
         self.onionPreviousFrames = max(0, min(5, self.settings.value("preferences/onionPreviousFrames", 1, int)))
         self.onionNextFrames = max(0, min(5, self.settings.value("preferences/onionNextFrames", 1, int)))
@@ -574,6 +576,8 @@ class AnimationEditor(AnimationSerialization):
         )
         self.ui.onionPreviewCheckBox.setChecked(self.onionPreviewEnabled)
         self.ui.onionPreviewCheckBox.toggled.connect(self.changeOnionPreview)
+        self.ui.onionShadowsCheckBox.setChecked(self.onion_shadows_enabled)
+        self.ui.onionShadowsCheckBox.toggled.connect(self.change_onion_shadows)
         self.setOnionRange(-self.onionPreviousFrames, self.onionNextFrames)
         self.ui.onionRangeSlider.rangeChanged.connect(self.changeOnionRange)
         self.setOnionOpacity(self.onionOpacity)
@@ -1356,6 +1360,7 @@ class AnimationEditor(AnimationSerialization):
         if self.shadow is not None:
             self.openGLWidget.makeCurrent()
             self.shadow.image = self._display_shadow_image()
+            self.updateOnionPreview(self.displayed_anim_frame or self.current_anim_frame)
             self.openGLWidget.update()
 
     @undoable("Change Shadow Size")
@@ -2315,9 +2320,9 @@ class AnimationEditor(AnimationSerialization):
         """Clears information boxes of the Frame Data."""
         self.current_anim_frame = None
         self.displayed_anim_frame = None
-        if self.onionSprites:
+        if self.onionSprites or self.onion_shadow_sprites:
             self.openGLWidget.makeCurrent()
-        for sprite in self.onionSprites:
+        for sprite in (*self.onionSprites, *self.onion_shadow_sprites):
             sprite.visible = False
         self.syncActionPointControls(None)
 
@@ -2753,6 +2758,20 @@ class AnimationEditor(AnimationSerialization):
             editor.setOnionPreviewEnabled(enabled)
         self.settings.sync()
 
+    def set_onion_shadows_enabled(self, enabled: bool) -> None:
+        self.onion_shadows_enabled = enabled
+        with QtCore.QSignalBlocker(self.ui.onionShadowsCheckBox):
+            self.ui.onionShadowsCheckBox.setChecked(enabled)
+        self.updateOnionPreview(self.displayed_anim_frame or self.current_anim_frame)
+        self.openGLWidget.update()
+
+    def change_onion_shadows(self, enabled: bool) -> None:
+        self.settings.setValue("preferences/onionShadows", enabled)
+        editors = self.document_host.preview_editors() if self.document_host else (self,)
+        for editor in editors:
+            editor.set_onion_shadows_enabled(enabled)
+        self.settings.sync()
+
     def setOnionRange(self, lower: int, upper: int) -> None:
         self.onionPreviousFrames = max(0, min(5, -lower))
         self.onionNextFrames = max(0, min(5, upper))
@@ -2786,11 +2805,12 @@ class AnimationEditor(AnimationSerialization):
         self.settings.sync()
 
     def clearOnionPreview(self) -> None:
-        if self.onionSprites:
+        if self.onionSprites or self.onion_shadow_sprites:
             self.openGLWidget.makeCurrent()
-            for sprite in self.onionSprites:
+            for sprite in (*self.onionSprites, *self.onion_shadow_sprites):
                 sprite.delete()
             self.onionSprites.clear()
+            self.onion_shadow_sprites.clear()
 
     def onionPreviewNeighbors(self, frame: AnimFrame | None) -> list[tuple[AnimFrame, int]]:
         if not self.onionPreviewEnabled or self.current_sequence is None:
@@ -2836,6 +2856,21 @@ class AnimationEditor(AnimationSerialization):
             sprite.opacity = round(self.onionOpacity / distance)
             sprite.visible = True
         for sprite in self.onionSprites[len(neighbors):]:
+            sprite.visible = False
+        shadow_neighbors = neighbors if self.onion_shadows_enabled else []
+        for index, (neighbor, distance) in enumerate(shadow_neighbors):
+            image = self._display_shadow_image()
+            if index == len(self.onion_shadow_sprites):
+                self.onion_shadow_sprites.append(pyglet.sprite.Sprite(
+                    image, batch=self.openGLWidget.batch, group=pyglet.graphics.Group(-1)
+                ))
+            sprite = self.onion_shadow_sprites[index]
+            sprite.image = image
+            sprite.position = self.get_shadow_position(neighbor)
+            sprite.scale = self.scale
+            sprite.opacity = round(self.onionOpacity / distance)
+            sprite.visible = True
+        for sprite in self.onion_shadow_sprites[len(shadow_neighbors):]:
             sprite.visible = False
 
     def _playing_animation(self, dt: float) -> None:
@@ -3175,6 +3210,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
             self.preferenceActions["cameraLocked"].isChecked()
         )
         editor.setOnionPreviewEnabled(self.settings.value("preferences/onionPreview", False, bool))
+        editor.set_onion_shadows_enabled(self.settings.value("preferences/onionShadows", False, bool))
         editor.ui.onionPreviewGroupBox.setVisible(
             self.preferenceActions["showOnionControls"].isChecked()
         )

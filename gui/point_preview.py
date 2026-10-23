@@ -478,7 +478,7 @@ class ActionPointPreview:
             # and Qt's framebuffer must also be rebound before painting it.
             gl.makeCurrent()
         cache = self.views.setdefault(viewer, {})
-        for marker in (*viewer.ap_sprites, *viewer.onionSprites):
+        for marker in (*viewer.ap_sprites, *viewer.onionSprites, *viewer.onion_shadow_sprites):
             marker.visible = False
         if viewer.sprite:
             viewer.sprite.visible = False
@@ -536,6 +536,15 @@ class ActionPointPreview:
                 draw(("onion", member.identity, index), viewer.sheet_image, viewer.image_grid.rows,
                      viewer.image_grid.columns, sample.frame_index, origin, sample.mirrored, -19,
                      id(viewer.sheet_image), round(viewer.onionOpacity / distance), (190, 190, 190))
+                if viewer.onion_shadows_enabled and member.shadow_visible:
+                    shadow_artwork = viewer._display_shadow_image()
+                    if viewer is self.root:
+                        shadow_position = presentation.point(neighbor.shadow_offset.data())
+                    else:
+                        shadow_position = placement.presentation.point(neighbor.shadow_offset.data())
+                    draw(("onion-shadow", member.identity, index), shadow_artwork, 1, 1, 0,
+                         shadow_position, False, -21, (viewer.shadow_size, id(shadow_artwork)),
+                         round(viewer.onionOpacity / distance))
 
         for order, identity in enumerate(self.order):
             member = next((m for m in self.members if m.identity == identity), None)

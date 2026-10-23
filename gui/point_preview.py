@@ -188,7 +188,12 @@ class ActionPointPreview:
                 tooltip.append("Facing follows the main sprite; direction controls turn the preview together.")
             if member.follow_action:
                 follows.append("Action")
-                tooltip.append("Selects the main sprite's action name; a missing action hides this sprite.")
+                tooltip.append("Selects the main sprite's action, then uses the rigs ordered fallbacks.")
+                if self.root.current_anim_group and editor.current_anim_group:
+                    requested = self.root.current_anim_group.name
+                    selected = editor.current_anim_group.name
+                    if member.frame is not None and requested != selected:
+                        tooltip.append(f"Action fallback: {requested} → {selected}")
             if member.inherit_mirroring:
                 follows.append("Mirror")
                 tooltip.append("Artwork mirroring follows the main sprite.")
@@ -234,6 +239,11 @@ class ActionPointPreview:
         member.shadow_visible = not member.shadow_visible
         self.refresh()
 
+    def action_candidates(self, editor, requested):
+        """An unlinked child shares the main rig's preview action conventions."""
+        profile = editor._rig_profile_loaded if editor.rig_profile is not None else self.root._rig_profile_loaded
+        return profile.action_candidates(requested) if profile else (requested,)
+
     def advance(self, seconds):
         """Each instance consumes its own selected sequence and elapsed time."""
         for member in self.members:
@@ -241,7 +251,9 @@ class ActionPointPreview:
             group = editor.current_anim_group
             if editor is not self.root and member.follow_action:
                 parent_group = self.root.current_anim_group
-                target = next((g for g in editor.groups if parent_group and g.name == parent_group.name), None)
+                candidates = self.action_candidates(editor, parent_group.name) if parent_group else ()
+                groups_by_name = {g.name: g for g in editor.groups}
+                target = next((groups_by_name[name] for name in candidates if name in groups_by_name), None)
                 if target is not None and target is not group:
                     elapsed = member.ticks
                     editor.openGLWidget.makeCurrent()
@@ -318,8 +330,11 @@ class ActionPointPreview:
             child.warning = ""
             if child.frame is None:
                 child.warning = f"{self.label(child.editor)}: no artwork for the selected action/direction."
-                if child.follow_action and self.root.current_anim_group and not any(g.name == self.root.current_anim_group.name for g in child.editor.groups):
-                    child.warning = f"{self.label(child.editor)}: action {self.root.current_anim_group.name!r} is missing. Choose a child action or disable following the parent's action name."
+                if child.follow_action and self.root.current_anim_group:
+                    candidates = self.action_candidates(child.editor, self.root.current_anim_group.name)
+                    if not any(g.name in candidates for g in child.editor.groups):
+                        tried = ", ".join(repr(name) for name in candidates)
+                        child.warning = f"{self.label(child.editor)}: no matching action. Tried {tried}. Configure rig action_fallbacks, choose a child action or disable following the parent's action."
                 continue
             sample = sample_sprite(child.identity, child.editor, child.frame, facing=child.direction,
                                    presentation=Presentation(scale=presentation.scale))
@@ -603,7 +618,8 @@ class RelationshipDialog(ScreenFitDialog):
         self.follow_facing = QtWidgets.QCheckBox("Follow parent's logical facing")
         self.follow_facing.setChecked(member.follow_facing)
         layout.addRow(self.follow_facing)
-        self.follow_action = QtWidgets.QCheckBox("Select the parent's action name (missing action hides sprite)")
+        self.follow_action = QtWidgets.QCheckBox("Follow parent's action (use rig fallbacks if missing)")
+        self.follow_action.setToolTip("Uses this sprite's rig, or the main sprite's rig if none is linked. Tries the exact action first, then its action_fallbacks in order. No match hides the sprite.")
         self.follow_action.setChecked(member.follow_action)
         layout.addRow(self.follow_action)
         self.synchronized = QtWidgets.QCheckBox("Synchronize timeline phase with parent")

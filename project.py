@@ -66,6 +66,11 @@ class RigProfile:
     name: str
     action_points: tuple[str, ...]
     suggested_actions: tuple[str, ...] = ()
+    action_fallbacks: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+    def action_candidates(self, name: str) -> tuple[str, ...]:
+        """Try the requested action first, then its explicitly ordered alternatives."""
+        return (name, *self.action_fallbacks.get(name, ()))
 
 
 def load_profile_yaml(path: str | Path):
@@ -80,7 +85,7 @@ def load_profile_yaml(path: str | Path):
 def rig_from_data(data: object) -> RigProfile:
     """Validate a standalone rig or an embedded rig with supplied id/version."""
     required = {"version", "id", "name", "action_points"}
-    if not isinstance(data, dict) or required - data.keys() or data.keys() - (required | {"suggested_actions"}):
+    if not isinstance(data, dict) or required - data.keys() or data.keys() - (required | {"suggested_actions", "action_fallbacks"}):
         msg = "Rig Profile: missing or unknown fields."
         raise FormatError(msg)
     if type(data["version"]) is not int or data["version"] != 1:
@@ -88,8 +93,18 @@ def rig_from_data(data: object) -> RigProfile:
         raise FormatError(msg)
     validate_rig_id(data["id"])
     name = validate_point_name(data["name"])
+    fallbacks = data.get("action_fallbacks", {})
+    if not isinstance(fallbacks, dict):
+        raise FormatError("action_fallbacks must be a mapping of action names to ordered lists.")
+    fallback_rules = {}
+    for action, choices in fallbacks.items():
+        action = validate_point_name(action)
+        candidates = validate_point_names(choices, f"action_fallbacks.{action}")
+        if not candidates:
+            raise FormatError(f"action_fallbacks.{action}: provide at least one fallback.")
+        fallback_rules[action] = candidates
     return RigProfile(data["id"], name, validate_point_names(data["action_points"], "action_points"),
-                      validate_point_names(data.get("suggested_actions", []), "suggested_actions"))
+                      validate_point_names(data.get("suggested_actions", []), "suggested_actions"), fallback_rules)
 
 
 def load_rig_profiles(path: str | Path) -> dict[str, RigProfile]:
@@ -262,7 +277,7 @@ def profile_from_data(value: object) -> ProjectProfile:
         raise FormatError("rigs: expected a mapping keyed by rig ID.")
     rig_rules = {}
     for rig_id, definition in rigs.items():
-        definition = _object(definition, ("name", "action_points", "suggested_actions"), f"rigs.{rig_id}")
+        definition = _object(definition, ("name", "action_points", "suggested_actions", "action_fallbacks"), f"rigs.{rig_id}")
         rig_rules[rig_id] = rig_from_data({**definition, "version": 1, "id": rig_id})
     packing = _object(data.get("packing", {}), ("padding", "power_of_two"), "packing")
     palette = _object(data.get("palette", {}), ("enabled", "include_transparent"), "palette")

@@ -83,7 +83,8 @@ class EditorSmokeTest(unittest.TestCase):
         app.setQuitOnLastWindowClosed(True)
         errors = []
         with tempfile.TemporaryDirectory(prefix="mdframeedit-smoke-") as folder:
-            root = Path(folder)
+            # Windows TEMP may contain an 8.3 alias; the editor uses resolved paths.
+            root = Path(folder).resolve()
             source = make_sprite(root / "sprite")
             settings = main.QSettings(
                 str(root / "settings.ini"), main.QSettings.Format.IniFormat
@@ -127,7 +128,8 @@ class EditorSmokeTest(unittest.TestCase):
                     self.assertTrue(action.isEnabled())
                     self.assertTrue(action.isChecked())
                     self.assertIn(
-                        str(single / "Anim.png"), editor.artworkWatcher.files()
+                        (single / "Anim.png").resolve(),
+                        [Path(path).resolve() for path in editor.artworkWatcher.files()],
                     )
                     self.assertTrue(
                         settings.value("preferences/autoReloadArtwork", False, bool)
@@ -263,7 +265,7 @@ class EditorSmokeTest(unittest.TestCase):
             else [sys.executable, str(PROJECT_ROOT / "main.py")]
         )
         with tempfile.TemporaryDirectory(prefix="mdframeedit-smoke-cli-") as folder:
-            root = Path(folder)
+            root = Path(folder).resolve()
             source = make_sprite(root / "source")
             for target, output in (
                 ("native", root / "native"),

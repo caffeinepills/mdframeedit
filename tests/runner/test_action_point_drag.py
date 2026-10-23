@@ -52,7 +52,7 @@ class ActionPointDragTest(unittest.TestCase):
     def setUp(self) -> None:
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        root = Path(self.stack.enter_context(tempfile.TemporaryDirectory())).resolve()
         settings = main.QSettings(str(root / "settings.ini"), main.QSettings.Format.IniFormat)
         self.stack.enter_context(patch.object(main, "QSettings", return_value=settings))
         self.stack.enter_context(patch.object(main, "PygletWidget", PreviewStub))

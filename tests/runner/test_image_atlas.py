@@ -43,7 +43,7 @@ class ImageAtlasTest(unittest.TestCase):
             for sequence in document.groups[0].directions:
                 sequence.frames.append(AnimFrame(frame_index=0, duration=1))
             with tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve()
                 source = document.export(root / 'native', SheetFormat.NATIVE)
                 assert main(['convert', str(source), '--to', 'single', '-o', str(root / 'single')]) == 0
                 sys.argv = ['main.py', 'convert', str(source), '--to', 'single', '-o', str(root / 'legacy')]

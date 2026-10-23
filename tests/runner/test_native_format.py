@@ -44,7 +44,7 @@ class NativeFormatTest(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="mdframeedit-native-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.document = make_document()
 
     def save(self, document=None, name="Sprite.json"):

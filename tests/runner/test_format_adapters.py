@@ -47,7 +47,7 @@ class FormatAdapterTest(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory(prefix="mdframeedit-adapters-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.document = SpriteDocument(
             Image.new("RGBA", (5, 7), (40, 80, 120, 128)), 5, 7,
             groups=[AnimGroup(-1, "Custom/Action", directions=[AnimationSequence([

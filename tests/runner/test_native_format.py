@@ -152,7 +152,7 @@ class NativeFormatTest(unittest.TestCase):
         from cli import convert_job, create_parser, palette_main, plan_conversions
         args = create_parser().parse_args([str(source.parent), "--to", "multi", "-o", str(self.root / "output")])
         jobs = plan_conversions(args)
-        self.assertEqual([job.source for job in jobs], [native])
+        self.assertEqual([job.source.resolve() for job in jobs], [native.resolve()])
         self.assertFalse(convert_job(jobs[0]).error)
         with patch("builtins.print"):
             self.assertEqual(palette_main([str(native)]), 0)

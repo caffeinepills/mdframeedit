@@ -271,6 +271,7 @@ class EditorSmokeTest(unittest.TestCase):
                 ("native", root / "native"),
                 ("single", root / "single"),
                 ("multi", root / "multi"),
+                ("runtime", root / "runtime"),
             ):
                 result = subprocess.run(
                     [
@@ -295,7 +296,8 @@ class EditorSmokeTest(unittest.TestCase):
                 if not executable:
                     self.assertIn("Converted 1; failed 0.", result.stdout)
                 source = output / (
-                    {"native": "Sprite.json", "single": "FrameData.xml", "multi": "AnimData.xml"}[target]
+                    {"native": "Sprite.json", "single": "FrameData.xml", "multi": "AnimData.xml",
+                     "runtime": "Sprite.mdruntime"}[target]
                 )
                 self.assertTrue(source.is_file())
             with Image.open(root / "multi" / "Idle-Anim.png") as image:

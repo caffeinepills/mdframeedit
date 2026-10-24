@@ -72,6 +72,9 @@ jobs:
       - name: Test format adapters
         run: python tests/runner/test_format_adapters.py
 
+      - name: Test runtime containers
+        run: python tests/runner/test_runtime_format.py
+
       - name: Test project builds
         run: python tests/runner/test_project_build.py
 

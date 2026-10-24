@@ -13,7 +13,8 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 
-FORMAT_FILES = {"native": "Sprite.json", "single": "FrameData.xml", "multi": "AnimData.xml"}
+FORMAT_FILES = {"native": "Sprite.json", "single": "FrameData.xml", "multi": "AnimData.xml",
+                "runtime": "Sprite.mdruntime"}
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class ConversionJob:
     overwrite: bool = False
     trim_copies: bool = True
     collapse_singles: bool = True
+    filename: str | None = None
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,7 @@ class ConversionResult:
     source: Path
     destination: Path
     error: str = ""
+    filename: str | None = None
 
 
 class ConversionError(Exception):
@@ -49,12 +52,12 @@ def positive_integer(value):
 
 def create_parser():
     parser = argparse.ArgumentParser(
-        description="Convert native JSON and single-sheet/multi-sheet XML sprites without opening the editor.",
+        description="Convert native JSON and XML sprites, or export runtime containers, without opening the editor.",
         epilog="Other commands: palette INPUT; build INPUT --profile PROFILE.yaml -o OUTPUT.",
     )
     parser.add_argument("input", type=Path, help="source JSON/XML file or sprite folder")
     parser.add_argument(
-        "--to", choices=FORMAT_FILES, required=True, help="destination sheet format"
+        "--to", choices=FORMAT_FILES, required=True, help="destination format (runtime is export-only)"
     )
     parser.add_argument(
         "-o",
@@ -88,6 +91,13 @@ def create_parser():
         help="allow replacing files in nonempty destination folders",
     )
     parser.add_argument(
+        "--runtime-layout",
+        choices=("tree", "flat", "spritecollab"),
+        default="tree",
+        help="runtime output layout: tree preserves folders; flat joins folder names with dashes; "
+             "spritecollab additionally pads numeric paths to four components (default: %(default)s)",
+    )
+    parser.add_argument(
         "--no-trim-copies",
         dest="trim_copies",
         action="store_false",
@@ -105,6 +115,9 @@ def create_parser():
 def plan_conversions(args):
     source = args.input.resolve()
     output = args.output.resolve()
+    layout = args.runtime_layout
+    if layout != "tree" and args.to != "runtime":
+        raise ConversionError("--runtime-layout flat/spritecollab requires --to runtime.")
     if not source.exists():
         msg = f"Input does not exist: {source}"
         raise ConversionError(msg)
@@ -118,7 +131,8 @@ def plan_conversions(args):
         root = source.parent
     else:
         root = source
-        expected = (["framedata.xml", "animdata.xml"] if args.to == "native" else
+        expected = (["sprite.json", "framedata.xml", "animdata.xml"] if args.to == "runtime" else
+                    ["framedata.xml", "animdata.xml"] if args.to == "native" else
                     ["sprite.json", FORMAT_FILES["multi" if args.to == "single" else "single"].casefold()])
         candidates = source.rglob("*") if args.recursive else source.iterdir()
         sources = sorted(
@@ -142,40 +156,60 @@ def plan_conversions(args):
                 "Use --recursive to search subfolders."
             )
             raise ConversionError(msg)
-    jobs = [
-        ConversionJob(
-            path,
-            output / path.parent.relative_to(root),
-            args.to,
-            args.overwrite,
-            args.trim_copies,
-            args.collapse_singles,
-        )
-        for path in sources
-    ]
+    naming_root = root
+    if layout == "spritecollab":
+        # Keep the full numeric species/form/color/gender chain when input is
+        # a selected species, variant folder, or individual metadata file.
+        while len(naming_root.name) == 4 and naming_root.name.isascii() and naming_root.name.isdigit():
+            naming_root = naming_root.parent
+    jobs = []
+    for path in sources:
+        relative = path.parent.relative_to(root)
+        filename = None
+        if layout != "tree":
+            parts = relative.parts or (root.name,)
+            if layout == "spritecollab":
+                parts = path.parent.relative_to(naming_root).parts
+                if not 1 <= len(parts) <= 4 or any(
+                    len(part) != 4 or not part.isascii() or not part.isdigit() for part in parts
+                ):
+                    raise ConversionError(
+                        f"SpriteCollab layout requires one to four four-digit folder components: {path.parent}"
+                    )
+                parts = (*parts, *("0000" for _ in range(4 - len(parts))))
+            filename = "-".join(parts) + Path(FORMAT_FILES["runtime"]).suffix
+        jobs.append(ConversionJob(
+            path, output / relative if layout == "tree" else output,
+            args.to, args.overwrite, args.trim_copies, args.collapse_singles, filename,
+        ))
     source_folders = {path.parent for path in sources}
-    destinations = set()
+    destinations = {}
     for job in jobs:
         if job.destination in source_folders:
             msg = f"Choose an output folder separate from the source sprites: {job.destination}"
             raise ConversionError(msg)
-        key = str(job.destination).casefold()
+        key = str(job.destination / job.filename if job.filename else job.destination).casefold()
         if key in destinations:
-            msg0 = f"Multiple sprites would write to the same destination: {job.destination}"
+            msg0 = f"Multiple sprites would write to the same destination: {destinations[key]} and {job.source}"
             raise ConversionError(msg0)
-        destinations.add(key)
+        destinations[key] = job.source
     return jobs
 
 
 def convert_job(job):
-    """Convert an independent document and write to its own folder."""
+    """Convert a document into its planned bundle, sharing a folder when named."""
     try:
+        if job.filename:
+            targets = (job.destination / job.filename,
+                       job.destination / Path(job.filename).with_suffix(".png").name)
+            contains_files = any(path.exists() for path in targets)
+        else:
+            contains_files = job.destination.is_dir() and any(
+                not path.is_dir() for path in job.destination.iterdir()
+            )
         if job.destination.exists() and (
             not job.destination.is_dir()
-            or (
-                not job.overwrite
-                and any(not path.is_dir() for path in job.destination.iterdir())
-            )
+            or (not job.overwrite and contains_files)
         ):
             msg = f"Destination already contains files; use --overwrite to replace them: {job.destination}"
             raise ConversionError(msg)
@@ -189,12 +223,13 @@ def convert_job(job):
             raise ConversionError(msg_0)
         document.trim_copies = job.trim_copies
         document.collapse_singles = job.collapse_singles
-        target = {"native": SheetFormat.NATIVE, "single": SheetFormat.SINGLE, "multi": SheetFormat.MULTI}[job.target_format]
-        document.export(job.destination, target)
-        return ConversionResult(job.source, job.destination)
+        target = {"native": SheetFormat.NATIVE, "single": SheetFormat.SINGLE,
+                  "multi": SheetFormat.MULTI, "runtime": SheetFormat.RUNTIME}[job.target_format]
+        document.export(job.destination, target, filename=job.filename)
+        return ConversionResult(job.source, job.destination, filename=job.filename)
     except Exception as error:
         return ConversionResult(
-            job.source, job.destination, str(error) or type(error).__name__
+            job.source, job.destination, str(error) or type(error).__name__, job.filename
         )
 
 
@@ -313,7 +348,7 @@ def main(argv=None):
             else:
                 successes += 1
                 print(
-                    f"OK {result.source} -> {result.destination / FORMAT_FILES[args.to]}",
+                    f"OK {result.source} -> {result.destination / (result.filename or FORMAT_FILES[args.to])}",
                     flush=True,
                 )
     except KeyboardInterrupt:

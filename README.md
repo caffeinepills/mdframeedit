@@ -8,7 +8,7 @@ and export. Open existing sprites or create one from an image.
 * **New / Ctrl+N** - Import an image and choose its frame cell size.
 * **Open / Ctrl+O** - Open sprite JSON or XML files in separate tabs.
 * **Save / Save As** - Save the active sprite as native JSON and PNG.
-* **Export** - Write a single-sheet or multi-sheet XML bundle.
+* **Export** - Write single-sheet or multi-sheet XML bundles.
 
 Imported XML files are left untouched. Each sprite tab has its own Undo/Redo.
 

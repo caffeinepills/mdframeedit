@@ -87,6 +87,25 @@ if you prefer.
 * Added Action Point marker size.
 * Allow copy and pasting action points to multiple frames at once.
 * WASD now selects sprite facing, S no longer toggles shadows.
+* Added image import for creating new sprite atlases.
+* Added live sprite attachment previews with independent action, facing, timing, and mirroring controls.
+* Added ordered rig action fallbacks for preview playback.
+* Added Separate Alignments for side-by-side sprite comparisons.
+* Added readonly snapshots in layers of the current sprite for comparing changes.
+* Added Shadow Point as a preview attachment anchor.
+* Added an option to show shadows in onion skinning.
+* Added a shadow preview color picker and a Keep frame option when changing direction.
+
+**Changed**
+
+* Split Recent Sprites and Recent Previews into separate menus.
+* Editor previews now use the .mdpreview extension.
+* Saving a preview adds or updates its recent entry without duplicates.
+
+**Fixed**
+
+* View Layers stays visible when opening another sprite tab.
+* Ending a preview also closes its snapshot document tabs.
 
 ## 2.0
 

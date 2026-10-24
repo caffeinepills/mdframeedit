@@ -447,7 +447,8 @@ class AnimationEditor(AnimationSerialization):
 
         self.shadow_image = self._shadow_image_data(template_image())
         self._shadow_size = 0
-        self._shadow_display_images: dict[int, pyglet.image.ImageData] = {}
+        self._shadow_display_images: dict[tuple[int, str], pyglet.image.ImageData] = {}
+        self.shadow_color = "#000000"
 
         self.sprite = None
         self.shadow: pyglet.sprite.Sprite | None = None
@@ -615,6 +616,10 @@ class AnimationEditor(AnimationSerialization):
 
         self.ui.shadowSizeComboBox.currentIndexChanged.connect(self.apply_shadow_size)
         self.ui.previewShadowCheckBox.toggled.connect(self._refresh_shadow_display)
+        self.set_shadow_color(self.settings.value("preferences/shadowColor", "#000000", str))
+        self.ui.shadowColorButton.clicked.connect(self.choose_shadow_color)
+        self.ui.keepDirectionFrameCheckBox.setChecked(self.settings.value("preferences/keepDirectionFrame", False, bool))
+        self.ui.keepDirectionFrameCheckBox.toggled.connect(self.change_keep_direction_frame)
         self.ui.showActionPointsCheckBox.toggled.connect(self.setActionPointsVisible)
         self.pointDragState: tuple[int, EditState] | None = None
         self.ui.sheetFramePicture.pointDragStarted.connect(self.beginPointDrag)
@@ -636,6 +641,7 @@ class AnimationEditor(AnimationSerialization):
                     partial(self.actionPointChanged, pointName)
                 )
         self.ui.loadRigProfileButton.clicked.connect(self.chooseRigProfile)
+        self.ui.projectRigComboBox.currentIndexChanged.connect(self.choose_project_rig)
         self.ui.unlinkRigProfileButton.clicked.connect(lambda: self.setRigProfile(None))
         self.ui.actionPointComboBox.currentIndexChanged.connect(self.refreshNamedPointControls)
         self.ui.addActionPointButton.clicked.connect(self.promptLocalPoint)
@@ -684,6 +690,46 @@ class AnimationEditor(AnimationSerialization):
                     return
                 selected = ids[labels.index(label)]
             self.setRigProfile(path, selected)
+
+    def refresh_project_rig_selector(self) -> None:
+        host = self.document_host
+        project = host.project_profile if host else None
+        combo = self.ui.projectRigComboBox
+        combo.setVisible(project is not None)
+        self.ui.loadRigProfileButton.setVisible(project is None)
+        self.ui.unlinkRigProfileButton.setVisible(project is None)
+        with QtCore.QSignalBlocker(combo):
+            combo.clear()
+            if project is None:
+                return
+            combo.addItem("None (local points)", None)
+            for rig_id, rig in project.rigs.items():
+                combo.addItem(f"{rig.name} ({rig_id})", rig_id)
+                combo.setItemData(combo.count() - 1, f"{rig.name}\n{host.project_path}\nRig: {rig_id}",
+                                  QtCore.Qt.ItemDataRole.ToolTipRole)
+            if self.rig_profile is not None:
+                same_project = host._path_key(self.rig_profile) == host._path_key(host.project_path)
+                rig_id = self.rig_profile_id
+                if same_project and rig_id is None and len(project.rigs) == 1:
+                    rig_id = next(iter(project.rigs))
+                index = combo.findData(rig_id) if same_project and rig_id in project.rigs else -1
+                if index < 0:
+                    name = self._rig_profile_loaded.name if self._rig_profile_loaded else self.rig_profile_id or self.rig_profile.name
+                    combo.addItem(f"Current: {name} (outside project or unavailable)", None)
+                    combo.setItemData(combo.count() - 1, str(self.rig_profile), QtCore.Qt.ItemDataRole.ToolTipRole)
+                    index = combo.count() - 1
+                combo.setCurrentIndex(index)
+        combo.setEnabled(self.image_grid is not None and not self.frozen_preview)
+
+    def choose_project_rig(self, index: int) -> None:
+        host = self.document_host
+        if not host or host.project_profile is None or self.image_grid is None or self.frozen_preview:
+            return
+        rig_id = self.ui.projectRigComboBox.itemData(index)
+        if index == 0:
+            self.setRigProfile(None)
+        elif rig_id in host.project_profile.rigs:
+            self.setRigProfile(host.project_path, rig_id)
 
     @undoable("Change Rig Profile")
     def setRigProfile(self, path, rig_id=None):
@@ -743,18 +789,30 @@ class AnimationEditor(AnimationSerialization):
                 spin.setValue(value)
                 spin.setEnabled(selected and point is not None)
         profile = self._rig_profile_loaded
-        label = "Rig Profile: " + (profile.name if profile else "unavailable" if self.rig_profile else "none")
         missing = [name for name in profile.suggested_actions if not any(g.name == name for g in self.groups)] if profile else []
+        status = []
         if self._rig_profile_warning:
-            label += " — cannot load (relink with Load Profile)"
+            status.append("Cannot load rig profile:\n" + self._rig_profile_warning)
         if missing:
-            label += "\nSuggested actions missing: " + ", ".join(missing)
-        ui.rigProfileLabel.setText(label)
-        ui.rigProfileLabel.setToolTip(str(self.rig_profile or "") +
-                                    (f"\nRig: {self.rig_profile_id}" if self.rig_profile_id else "") +
-                                    "\n" + self._rig_profile_warning)
+            status.append("Suggested actions missing:\n" + "\n".join(missing))
+        status_text = "\n\n".join(status)
+        ui.rigProfileStatusLabel.setToolTip(status_text)
+        ui.rigProfileStatusLabel.setAccessibleDescription(status_text)
+        ui.rigProfileStatusLabel.setVisible(bool(status))
+        profile_details = (str(self.rig_profile or "") +
+                           (f"\nRig: {self.rig_profile_id}" if self.rig_profile_id else ""))
+        ui.projectRigComboBox.setToolTip(
+            "Choose a rig from the loaded project for this sprite. None unlinks the profile without changing authored coordinates."
+            + ("\n" + profile_details if self.rig_profile else ""))
+        ui.loadRigProfileButton.setText(profile.name + "…" if profile else
+                                       "Unavailable profile…" if self.rig_profile else "Load Profile…")
+        ui.loadRigProfileButton.setToolTip(
+            "Choose a named rig from a YAML Project Profile, or load a standalone YAML Rig Profile."
+            + ("\nCurrent: " + profile.name if profile else "")
+            + ("\n" + profile_details if self.rig_profile else ""))
         ui.unlinkRigProfileButton.setEnabled(self.rig_profile is not None)
         ui.loadRigProfileButton.setEnabled(self.image_grid is not None)
+        self.refresh_project_rig_selector()
         ui.addActionPointButton.setEnabled(self.image_grid is not None)
         self.updateActionPointActions()
 
@@ -1366,18 +1424,50 @@ class AnimationEditor(AnimationSerialization):
         if not self.ui.previewShadowCheckBox.isChecked():
             return self.shadow_image
         size = self.shadow_size
-        if size not in self._shadow_display_images:
-            self._shadow_display_images[size] = self._shadow_image_data(
-                shadow_image(size, black=True)
-            )
-        return self._shadow_display_images[size]
+        key = (size, self.shadow_color)
+        if key not in self._shadow_display_images:
+            mask = shadow_image(size, black=True)
+            image = Image.new("RGBA", mask.size, self.shadow_color)
+            image.putalpha(mask.getchannel("A"))
+            self._shadow_display_images[key] = self._shadow_image_data(image)
+        return self._shadow_display_images[key]
+
+    def set_shadow_color(self, value: str) -> None:
+        color = QtGui.QColor(value)
+        self.shadow_color = color.name() if color.isValid() else "#000000"
+        self.ui.shadowColorButton.setStyleSheet(
+            f"QToolButton {{ background-color: {self.shadow_color}; border: 1px solid palette(mid); border-radius: 3px; }}"
+        )
+        self._shadow_display_images.clear()
+        self._refresh_shadow_display()
+
+    def choose_shadow_color(self) -> None:
+        color = QtWidgets.QColorDialog.getColor(QtGui.QColor(self.shadow_color), self.window, "Shadow Preview Color")
+        if not color.isValid():
+            return
+        self.settings.setValue("preferences/shadowColor", color.name())
+        editors = self.document_host.preview_editors() if self.document_host else (self,)
+        for editor in editors:
+            editor.set_shadow_color(color.name())
+        self.ui.previewShadowCheckBox.setChecked(True)
+        self.settings.sync()
+
+    def change_keep_direction_frame(self, enabled: bool) -> None:
+        self.settings.setValue("preferences/keepDirectionFrame", enabled)
+        editors = self.document_host.preview_editors() if self.document_host else (self,)
+        for editor in editors:
+            with QtCore.QSignalBlocker(editor.ui.keepDirectionFrameCheckBox):
+                editor.ui.keepDirectionFrameCheckBox.setChecked(enabled)
+        self.settings.sync()
 
     def _refresh_shadow_display(self) -> None:
         if self.shadow is not None:
             self.openGLWidget.makeCurrent()
             self.shadow.image = self._display_shadow_image()
             self.updateOnionPreview(self.displayed_anim_frame or self.current_anim_frame)
-            self.openGLWidget.update()
+        if self.point_preview is not None:
+            self.point_preview.refresh()
+        self.openGLWidget.update()
 
     @undoable("Change Shadow Size")
     def apply_shadow_size(self, size: int) -> None:
@@ -2323,6 +2413,7 @@ class AnimationEditor(AnimationSerialization):
             if button != self.directionButtons[direction]:
                 button.setChecked(False)
 
+        row = self.ui.frameSlider.value() if self.ui.keepDirectionFrameCheckBox.isChecked() else 0
         self.current_direction = direction
         playing = self.animating
         pyglet.clock.unschedule(self._playing_animation)
@@ -2347,7 +2438,14 @@ class AnimationEditor(AnimationSerialization):
                 if self.current_sequence:
                     self.set_sequence_list()
 
-                self.ui.animationFrameList.setCurrentRow(0)
+                if self.current_sequence.frames:
+                    row = min(row, len(self.current_sequence.frames) - 1)
+                    self.current_anim_frame = self.current_sequence.frames[row]
+                    with QtCore.QSignalBlocker(self.ui.frameSlider):
+                        self.ui.frameSlider.setValue(row)
+                    self.ui.animationFrameList.setCurrentRow(row)
+                    self.set_anim_frame_values(self.current_anim_frame)
+                    self.set_animation()
                 if playing and self.current_sequence.frames:
                     pyglet.clock.schedule_once(self._playing_animation,
                                                self.anim_speed * self.current_anim_frame.duration)
@@ -3131,6 +3229,9 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         )
         self.settings = QSettings("MDFrameEditor", "Frame Editor")
         self.panelStates: dict[str, QtCore.QByteArray] = {}
+        self.project_path: pathlib.Path | None = None
+        self.project_profile = None
+        self.project_restore_error = ""
         self.maximizedLayoutTimer = QtCore.QTimer(self)
         self.maximizedLayoutTimer.setSingleShot(True)
         self.maximizedLayoutTimer.timeout.connect(self.fit_maximized_layout)
@@ -3168,6 +3269,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         self.newAction.setShortcut(QtGui.QKeySequence.StandardKey.New)
         self.newAction.triggered.connect(self.new_from_image_dialog)
         self.addAction(self.newAction)
+        self._create_project_menu()
         self._createPreferenceMenus()
         self.documentTabs.currentChanged.connect(self._activate_document)
         self.documentTabs.tabCloseRequested.connect(self.close_document)
@@ -3180,6 +3282,75 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
             self.restoreGeometry(geometry)
         # Apply saved dividers after Qt allocates the restored window's layout.
         QtCore.QTimer.singleShot(0, self._restoreVisiblePanelLayout)
+        self._restore_last_project()
+
+    def _create_project_menu(self) -> None:
+        self.projectMenu = QtWidgets.QMenu("Project", self)
+        self.openProjectAction = self.projectMenu.addAction("Open Project…", self.open_project_dialog)
+        self.closeProjectAction = self.projectMenu.addAction("Close Project", self.close_project)
+        self.projectMenu.addSeparator()
+        self.currentProjectAction = self.projectMenu.addAction("No project loaded")
+        self.currentProjectAction.setEnabled(False)
+        self._update_project_menu()
+
+    def _update_project_menu(self) -> None:
+        self.closeProjectAction.setEnabled(
+            self.project_path is not None or self.settings.contains("project/lastPath")
+        )
+        if self.project_path is not None:
+            self.currentProjectAction.setText(self.project_path.name)
+            self.currentProjectAction.setToolTip(str(self.project_path))
+        else:
+            self.currentProjectAction.setText("Project unavailable" if self.project_restore_error else "No project loaded")
+            self.currentProjectAction.setToolTip(self.project_restore_error)
+
+    def open_project_dialog(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Project", str(self.project_path or self.settings.value("project/lastPath", "", str)),
+            "Project Profiles (*.yaml *.yml)",
+        )
+        if path:
+            self.open_project(path)
+
+    def open_project(self, path: str | PathLike[str], *, restoring: bool = False) -> bool:
+        from project import load_profile
+        try:
+            project_path = pathlib.Path(path).resolve()
+            profile = load_profile(project_path)
+        except (FormatError, OSError, ValueError) as error:
+            if restoring:
+                self.project_restore_error = f"Could not restore project {path}: {error}"
+                self.statusBar().showMessage(self.project_restore_error, 15000)
+                self._update_project_menu()
+            else:
+                self.current_editor.create_error_popup(str(error))
+            return False
+        self.project_path = project_path
+        self.project_profile = profile
+        self.project_restore_error = ""
+        self.settings.setValue("project/lastPath", str(project_path))
+        self.settings.sync()
+        self._update_project_menu()
+        for editor in self.preview_editors():
+            editor.refresh_project_rig_selector()
+        self.statusBar().showMessage(f"Project loaded: {project_path}", 10000)
+        return True
+
+    def _restore_last_project(self) -> None:
+        path = self.settings.value("project/lastPath", "", str)
+        if path:
+            self.open_project(path, restoring=True)
+
+    def close_project(self) -> None:
+        self.project_path = None
+        self.project_profile = None
+        self.project_restore_error = ""
+        self.settings.remove("project/lastPath")
+        self.settings.sync()
+        self._update_project_menu()
+        for editor in self.preview_editors():
+            editor.refresh_project_rig_selector()
+        self.statusBar().showMessage("Project closed", 5000)
 
     def _createPreferenceMenus(self) -> None:
         self.settingsMenu = QtWidgets.QMenu("Settings", self)
@@ -3649,6 +3820,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
             for menu in (editor.ui.menuFile, subject.editMenu):
                 self.menuBar().addAction(menu.menuAction())
             self.menuBar().addMenu(self.viewMenu)
+            self.menuBar().addMenu(self.projectMenu)
             self.menuBar().addMenu(self.settingsMenu)
             editor.openGLWidget.timer.start()
             if editor.animating and editor.current_anim_frame is not None:

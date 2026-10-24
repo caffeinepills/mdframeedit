@@ -655,12 +655,15 @@ class ActionPointPreview:
                 shadow_visible = member.standalone_shadow_visible if member.separate_alignment else member.shadow_visible
                 if viewer.onion_shadows_enabled and shadow_visible:
                     shadow_artwork = viewer._display_shadow_image()
+                    # Keep the source image in the stamp: color changes clear
+                    # its owner's cache, allowing a bare id() to be reused for
+                    # a different color while our copied GPU grid is still live.
                     if viewer is self.root or member.separate_alignment:
                         shadow_position = ghost_presentation.point(neighbor.shadow_offset.data())
                     else:
                         shadow_position = placement.presentation.point(neighbor.shadow_offset.data())
                     draw(("onion-shadow", member.identity, index), shadow_artwork, 1, 1, 0,
-                         shadow_position, False, -21, (viewer.shadow_size, id(shadow_artwork)),
+                         shadow_position, False, -21, (viewer.shadow_size, shadow_artwork),
                          round(viewer.onionOpacity / distance), identity=member.identity)
 
         for order, identity in enumerate(self.order):
@@ -675,7 +678,7 @@ class ActionPointPreview:
                     shadow_artwork = source._display_shadow_image()
                     draw(("shadow", identity), shadow_artwork, 1, 1, 0,
                          sample.presentation.point(member.frame.shadow_offset.data()), False, -20,
-                         (source.shadow_size, id(shadow_artwork)), source.ui.shadowOpacitySlider.value(), identity=identity)
+                         (source.shadow_size, shadow_artwork), source.ui.shadowOpacitySlider.value(), identity=identity)
                 sprite = draw(identity, source.sheet_image, source.image_grid.rows, source.image_grid.columns,
                               sample.frame_index, origin, sample.mirrored, order, id(source.sheet_image),
                               source.ui.spriteOpacitySlider.value(), identity=identity)

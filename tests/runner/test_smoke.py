@@ -83,7 +83,8 @@ class EditorSmokeTest(unittest.TestCase):
         app.setQuitOnLastWindowClosed(True)
         errors = []
         with tempfile.TemporaryDirectory(prefix="mdframeedit-smoke-") as folder:
-            root = Path(folder)
+            # Windows TEMP may contain an 8.3 alias; the editor uses resolved paths.
+            root = Path(folder).resolve()
             source = make_sprite(root / "sprite")
             settings = main.QSettings(
                 str(root / "settings.ini"), main.QSettings.Format.IniFormat
@@ -176,6 +177,73 @@ class EditorSmokeTest(unittest.TestCase):
                     self.assertFalse(editor.artworkReloadTimer.isActive())
                     # Avoid a save prompt for the deliberate unsaved frame edit.
                     frame.duration = 1
+                    from formats.native import document_data
+                    from data import SheetFormat
+                    original_xml = (single / "FrameData.xml").read_bytes()
+                    native_path = root / "authoring" / "Sprite.json"
+                    expected = document_data(editor._sprite_document(), "Sprite.png")
+                    with patch.object(main.QFileDialog, "getSaveFileName", return_value=("", "")):
+                        self.assertFalse(editor.save_action_trigger())
+                    self.assertEqual(editor.sheet_format, SheetFormat.SINGLE)
+                    with patch.object(main.QFileDialog, "getSaveFileName", return_value=(str(native_path), "")):
+                        self.assertTrue(editor.save_action_trigger())
+                    self.assertEqual(editor.sheet_format, SheetFormat.NATIVE)
+                    self.assertEqual(editor.ui.groupBox_5.title(), "Sprite Sheet (JSON)")
+                    self.assertEqual(editor.artworkPath, native_path.with_suffix(".png"))
+                    self.assertEqual((single / "FrameData.xml").read_bytes(), original_xml)
+                    self.assertTrue(window.close_document(window.documentTabs.currentIndex()))
+                    editor = window.open_file(native_path)
+                    self.assertIsNotNone(editor)
+                    self.assertEqual(document_data(editor._sprite_document(), "Sprite.png"), expected)
+                    self.assertTrue(action.isEnabled())
+                    self.assertTrue(editor.ui.shadowSizeComboBox.isEnabled())
+                    invalid = root / "invalid.json"
+                    invalid.write_text('{"format":"unknown"}', encoding="utf-8")
+                    tab_count = window.documentTabs.count()
+                    with patch.object(main.AnimationEditor, "create_error_popup") as error:
+                        self.assertIsNone(window.open_file(invalid))
+                    error.assert_called_once()
+                    self.assertEqual(window.documentTabs.count(), tab_count)
+                    self.assertIs(window.current_editor, editor)
+                    self.assertEqual(document_data(editor._sprite_document(), "Sprite.png"), expected)
+                    # JSON documents participate in normal undo and Save routing.
+                    action.setChecked(True)
+                    layout = editor.nativeTextureLayout
+                    self.assertIsNotNone(layout)
+                    index = next(i for i, region in enumerate(layout.regions) if region is not None)
+                    x, y, w, h, tx, ty = layout.regions[index]
+                    with Image.open(native_path.with_suffix(".png")) as source:
+                        packed = source.convert("RGBA")
+                    packed.putpixel((x, y), (10, 60, 90, 128))
+                    packed.save(native_path.with_suffix(".png"))
+                    editor.reloadChangedArtwork()
+                    self.assertEqual(editor._sprite_document().image_grid[index].getpixel((tx, ty)),
+                                     (10, 60, 90, 128))
+                    self.assertEqual(document_data(editor._sprite_document(), "Sprite.png"), expected)
+                    action.setChecked(False)
+                    editor.ui.durationSpinBox.setValue(9)
+                    self.assertTrue(editor.undoStack.canUndo())
+                    editor.undoStack.undo()
+                    self.assertEqual(editor.current_anim_frame.duration, 1)
+                    editor.ui.durationSpinBox.setValue(7)
+                    self.assertTrue(editor.save_action_trigger())
+                    self.assertTrue(editor.undoStack.isClean())
+                    self.assertEqual(main.SpriteDocument.load(native_path).groups[0].directions[0].frames[0].duration, 7)
+                    self.assertTrue(editor._export_single_sheet(root / "json-single"))
+                    self.assertTrue(editor._export_multiple_sheets(root / "json-multi"))
+                    with patch.object(main.QInputDialog, "getText", side_effect=[("Copy", True), ("1", True)]):
+                        editor.duplicate_action()
+                    with patch.object(main.QtWidgets.QMessageBox, "question", return_value=main.QtWidgets.QMessageBox.StandardButton.Yes):
+                        editor.delete_action()
+                    self.assertEqual(len(editor.groups), 1)
+                    self.assertEqual(editor.groups[0].name, "Copy")
+                    self.assertEqual(editor.groups[0].copy_name, "")
+                    self.assertTrue(editor.save_action_trigger())
+                    editor.undoStack.undo()
+                    self.assertEqual(len(editor.groups), 2)
+                    self.assertEqual(editor.groups[1].copy_name, "Idle")
+                    editor.undoStack.redo()
+                    self.assertTrue(editor.undoStack.isClean())
                     window.show()
                     main.QtCore.QTimer.singleShot(250, window.close)
                     watchdog = main.QtCore.QTimer()
@@ -197,9 +265,10 @@ class EditorSmokeTest(unittest.TestCase):
             else [sys.executable, str(PROJECT_ROOT / "main.py")]
         )
         with tempfile.TemporaryDirectory(prefix="mdframeedit-smoke-cli-") as folder:
-            root = Path(folder)
+            root = Path(folder).resolve()
             source = make_sprite(root / "source")
             for target, output in (
+                ("native", root / "native"),
                 ("single", root / "single"),
                 ("multi", root / "multi"),
             ):
@@ -226,7 +295,7 @@ class EditorSmokeTest(unittest.TestCase):
                 if not executable:
                     self.assertIn("Converted 1; failed 0.", result.stdout)
                 source = output / (
-                    "FrameData.xml" if target == "single" else "AnimData.xml"
+                    {"native": "Sprite.json", "single": "FrameData.xml", "multi": "AnimData.xml"}[target]
                 )
                 self.assertTrue(source.is_file())
             with Image.open(root / "multi" / "Idle-Anim.png") as image:

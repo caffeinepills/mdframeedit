@@ -1,86 +1,111 @@
-Frame editor to edit FrameData.xml/AnimData.xml sheets and see results live instead of manually editing XML data and importing into your game.
+# Sprite Animation Editor
 
-**Note:**
-For an easier time, use existing FrameData or AnimData to use and modify. Also make sure the FrameWidth, FrameHeight XML datas are accurate for the sheet you are using.
+Edit sprite animations in native JSON, with FrameData.xml and AnimData.xml import
+and export. Open existing sprites or create one from an image.
 
-# Controls
-* **Open / Ctrl+O** - Select one or several sprite XML files. Each sprite opens
-  in its own tab, named after its containing folder.
-* **Save / Save As / Export** - Apply to the active sprite tab. Each tab keeps
-  its edits, selection, zoom, and shadow preview independently.
-* **Undo / Redo** - Available under Edit or standard keyboard shortcuts. (History works per tab)
-* **Copy / Paste Action Points** - Select a sprite sheet frame, then use Edit or
-  right-click the frame list. Copies the head, center and both hands. Works between
-  tabs. Ctrl/Cmd+C and V also work while the sheet frame list is focused.
-* **Copy / Paste Animation Settings** - Under Edit. Copy timing, sprite/shadow
-  offsets, and rush/hit/return frames between actions or tabs. Frame counts must
-  match in every direction.
-* **O** - Toggle Offset Display (Action Points), if loaded.
-* **S** - Toggle Shadow Display.
-* **Mouse Scroll** - Zoom in and Out of Preview. Zooming in follows the sprite's offsets as it animates.
-* **Hold Ctrl + Mouse Scroll** - Adjust opacity of loaded sprite.
-* **Edit Frame Cells** - Add or reduce whitespace around the frame cells. Useful if you need to add additional space from needing a larger frame.
-  * Also supports centering artwork in the frames after.
-  * Use Trim Extra Space to clamp around the max artwork size.
-  * Center artwork in each cell tidies the sheet.
-  * Automatically adjusts the offsets and action points from this operation.
+## Getting started
 
-* **Batch Edit Frames** - Allows applying offsets to frames in a selection, direction, or throughout the action.
+* **New / Ctrl+N** - Import an image and choose its frame cell size.
+* **Open / Ctrl+O** - Open sprite JSON or XML files in separate tabs.
+* **Save / Save As** - Save the active sprite as native JSON and PNG.
+* **Export** - Write single-sheet or multi-sheet XML bundles.
 
-# Settings
+Imported XML files are left untouched. Each sprite tab has its own Undo/Redo.
 
-* **Remember Window Size** - In-case you like a specific layout, you can make it persist between application launches.
+## Controls
 
-* **Lock Camera** - Stops following the sprite preview, allowing click drag to move the camera view around.
+Click the animation preview before using its keyboard controls.
 
-* **Auto Reload Sheet** - If a change occurs to the Anim.png it will automatically update your frames. Only supported in single sheet mode.
+| Key / gesture | Action |
+| --- | --- |
+| W / A / S / D | Change facing; combine keys for diagonals. |
+| O | Toggle Action Points. |
+| Mouse wheel | Zoom. |
+| Ctrl + mouse wheel | Adjust sprite opacity. |
+| Left-drag with Lock Camera unchecked | Pan. |
 
-# View
+Use the timeline to play or target frames.
 
-* **Show Sprite Dimensions** - Shows a yellow outline showing the dimensions of the current frame, with whitespace.
+The Edit menu includes copying Action Points and animation settings, resizing
+frame cells, and batch changes to durations and offsets. Copy/paste works across
+tabs, and Action Points can be pasted to multiple selected sheet frames.
 
-* **Include Sprite Whitespace** - The sheet frame preview will factor in it's white space when fitting to the widget.
+## Preview and settings
 
-* **View > Info...** Displays generic frame and sheet information including frame size and palette information.
+**View Layers** previews sprites together using Action Point relationships.
+Play Together / Pause Together controls their playback. Save Preview / Load
+Preview keeps the arrangement separate from sprite data.
 
+Settings includes window size persistence, camera locking and automatic artwork reload. View
+contains display options and sprite/palette information.
 
-# Preview
+Sprite and shadow opacity affect the preview. The shadow size dropdown changes
+the saved sprite data. For XML exports, **Trim Copies** writes shared actions as
+copy references; **Collapse Singles** combines identical directions.
 
-* **Timeline** - Play the animation or drag between frames to see the animation as you build it.
+## Running from source
 
-* **Animation Speed** - Adjust the animation speed to control how fast the animation plays back.
-
-* **Onion** - Slider to show previous or next frames in an animation. This can help with figuring out where your current frame should be placed.
-
-
-# Save Options
-
-**Trim Copies**: Instead of writing full animation data, will instead write an Animation Action as CopyOf data. If your program doesn't handle this scenario, leave unchecked to write all frame data.
-
-**Collapse Singles**: If there is only one sequence that is the same for all 8 directions, it will save it as 1 sequence. If your program doesn't handle this scenario, leave unchecked to write all 8 sequences.
-
-# Running from source
-
-Use Python 3.10 or newer. From the project directory, activate your virtual
-environment and install the project and its dependencies:
+Use Python 3.10 or newer:
 
 ```shell
 python -m pip install -e ".[gui]"
 python main.py
 ```
 
-Dependencies are declared in `pyproject.toml`.
+Build an executable with `pyinstaller MDFrameEditor.spec`.
 
-# Building
+## Command line
 
-If you want to build yourself, you can do so via Pyinstaller: `pyinstaller MDFrameEditor.spec` or Nuitka.
+```shell
+python main.py convert sprites/AnimData.xml --to single --output converted
+python main.py palette sprites/Anim.png
+```
 
-Downloads for Windows, MacOs, and Linux (untested) are provided.
+Use `python main.py convert --help` for conversion options.
+
+## Known issues
+
+Packaged builds can trigger antivirus false positives. You can build from source
+if you prefer.
+
+![Screenshot](https://github.com/user-attachments/assets/07bad09b-7c1d-46fc-aede-abad219e65ba)
+
+<details>
+<summary>Version history</summary>
+
 
 # Version history
 
 
 ---
+
+## 2.1
+
+** New **
+
+* Added a native format.
+* Added Action Point marker size.
+* Allow copy and pasting action points to multiple frames at once.
+* WASD now selects sprite facing, S no longer toggles shadows.
+* Added image import for creating new sprite atlases.
+* Added live sprite attachment previews with independent action, facing, timing, and mirroring controls.
+* Added ordered rig action fallbacks for preview playback.
+* Added Separate Alignments for side-by-side sprite comparisons.
+* Added readonly snapshots in layers of the current sprite for comparing changes.
+* Added Shadow Point as a preview attachment anchor.
+* Added an option to show shadows in onion skinning.
+* Added a shadow preview color picker and a Keep frame option when changing direction.
+
+**Changed**
+
+* Split Recent Sprites and Recent Previews into separate menus.
+* Editor previews now use the .mdpreview extension.
+* Saving a preview adds or updates its recent entry without duplicates.
+
+**Fixed**
+
+* View Layers stays visible when opening another sprite tab.
+* Ending a preview also closes its snapshot document tabs.
 
 ## 2.0
 
@@ -226,75 +251,4 @@ Downloads for Windows, MacOs, and Linux (untested) are provided.
 
 * Initial Release
 
-# Known Issues
-* **False virus notification**: Due to PyInstaller (the packaging utility) being used by people to package malicious 
- programs, many anti-virus programs may flag this packaged program. To get around this you will have to add an exception with your antivirus to the directory you will keep the program at.
- [Click here for an article on adding exceptions for Microsoft Defender](https://support.microsoft.com/en-us/windows/add-an-exclusion-to-windows-security-811816c0-4dfd-af4a-47e4-c301afe13b26)
-
-If you don't trust the release versions, you can download the source and package it into an executable yourself with pyinstaller:
-`pyinstaller MDFrameEditor.spec`
-
-![Screenshot](https://github.com/user-attachments/assets/07bad09b-7c1d-46fc-aede-abad219e65ba)
-
-# Command-line conversion
-
-To check a sheet's palette without opening the editor:
-
-```shell
-python main.py palette sprites/FrameData.xml
-python main.py palette sprites/AnimData.xml
-python main.py palette sprites/Anim.png
-```
-
-This lists RGB hex values, RGBA values and pixel counts, plus the total palette
-count. XML inputs use the same working sheet as the editor's Info window. For multi sheets, that means the
-imported sheet with duplicate frames combined. PNG inputs count the image as-is.
-You can also pass a sprite folder containing one of the XML files.
-To save the report, add `> palette.txt` to the command.
-
-You can convert between single and multi sheets without opening the editor:
-
-```shell
-python main.py convert sprites/FrameData.xml --to multi --output converted/multi
-python main.py convert sprites/AnimData.xml --to single --output converted/single
-```
-
-You can also convert a whole folder. Use `--recursive` to include its subfolders:
-
-```shell
-python main.py convert sprites --to single --output converted --recursive --jobs 4
-```
-
-When converting a folder, it looks for `AnimData.xml` for `--to single` and
-`FrameData.xml` for `--to multi`. The output keeps the same folder structure.
-Without `--recursive`, it only checks the folder you selected. If your output
-folder is inside that folder, it won't search through the output again.
-
-If you select an XML file directly, it can have a different name. Just keep its
-PNGs in the same folder.
-
-By default, it converts up to 4 sprites at once. Use `--jobs` to change that, or
-`--executor serial` to convert them one at a time.
-
-Your original files aren't changed. Pick a separate folder for the output.
-If that folder already contains files, add `--overwrite` to replace them.
-Existing subfolders are fine. If one sprite fails, it will show an error and
-continue with the others. It uses the same save checks as the editor and won't
-change your editor settings.
-
-Trim Copies and Collapse Singles are enabled by default. Use `--no-trim-copies`
-to write the full animation instead of a copy reference. Use
-`--no-collapse-singles` to save all 8 directions even if they're the same.
-
-For a list of options, run `python main.py convert --help`.
-If you're using this in a script, exit codes are 0 for success, 1 if a conversion
-fails, and 2 if the arguments or input aren't valid.
-
-Once installed, you can also use `mdframeedit-convert`:
-
-```shell
-mdframeedit-convert sprites --to multi --output converted --recursive --jobs 4
-```
-
-If you only want the CLI, install with `python -m pip install -e .`. This only
-needs Pillow. Use `python -m pip install -e ".[gui]"` if you also want the editor.
+</details>

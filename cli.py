@@ -1,4 +1,4 @@
-"""Sprite conversion using the standalone Pillow/XML backend."""
+"""Sprite conversion using the standalone Pillow/JSON/XML backend."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 
-FORMAT_FILES = {"single": "FrameData.xml", "multi": "AnimData.xml"}
+FORMAT_FILES = {"native": "Sprite.json", "single": "FrameData.xml", "multi": "AnimData.xml"}
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,8 @@ class ConversionJob:
     overwrite: bool = False
     trim_copies: bool = True
     collapse_singles: bool = True
+    verify_png: bool = True
+    optimize_png: bool = True
 
 
 @dataclass(frozen=True)
@@ -47,12 +49,19 @@ def positive_integer(value):
     return number
 
 
+def add_png_arguments(parser):
+    parser.add_argument("--no-png-verification", dest="verify_png", action="store_false",
+                        help="skip PNG pixel round-trip checks; keep format validation")
+    parser.add_argument("--no-png-optimization", dest="optimize_png", action="store_false",
+                        help="write ordinary RGBA PNGs without palette or compression optimization")
+
+
 def create_parser():
     parser = argparse.ArgumentParser(
-        description="Convert single-sheet and multi-sheet sprite bundles without opening the editor.",
-        epilog="To inspect artwork instead, use: palette INPUT (XML file, sprite folder, or PNG sheet).",
+        description="Convert native JSON and single-sheet/multi-sheet XML sprites without opening the editor.",
+        epilog="Other commands: palette INPUT; build INPUT --profile PROFILE.yaml -o OUTPUT.",
     )
-    parser.add_argument("input", type=Path, help="source XML file or sprite folder")
+    parser.add_argument("input", type=Path, help="source JSON/XML file or sprite folder")
     parser.add_argument(
         "--to", choices=FORMAT_FILES, required=True, help="destination sheet format"
     )
@@ -67,7 +76,7 @@ def create_parser():
         "-r",
         "--recursive",
         action="store_true",
-        help="also search subfolders for source sprite XML files",
+        help="also search subfolders for source sprite JSON/XML files",
     )
     parser.add_argument(
         "-j",
@@ -99,6 +108,7 @@ def create_parser():
         action="store_false",
         help="write all eight directions, including identical sequences",
     )
+    add_png_arguments(parser)
     return parser
 
 
@@ -112,36 +122,40 @@ def plan_conversions(args):
         msg = f"Output must be a folder: {output}"
         raise ConversionError(msg)
     if source.is_file():
-        if source.suffix.lower() != ".xml":
-            raise ConversionError("Input must be an XML file or a sprite folder.")
+        if source.suffix.lower() not in (".xml", ".json"):
+            raise ConversionError("Input must be a JSON/XML file or a sprite folder.")
         sources = [source]
         root = source.parent
     else:
         root = source
-        expected = FORMAT_FILES["multi" if args.to == "single" else "single"].casefold()
+        expected = (["framedata.xml", "animdata.xml"] if args.to == "native" else
+                    ["sprite.json", FORMAT_FILES["multi" if args.to == "single" else "single"].casefold()])
         candidates = source.rglob("*") if args.recursive else source.iterdir()
         sources = sorted(
             path
             for path in candidates
             if path.is_file()
-            and path.name.casefold() == expected
+            and path.name.casefold() in expected
             and not path.is_relative_to(output)
         )
+        # A folder can contain both an imported XML and its native authoring
+        # document. Prefer the native source (or single XML for native import).
+        preferred = {}
+        for path in sources:
+            previous = preferred.get(path.parent)
+            if previous is None or expected.index(path.name.casefold()) < expected.index(previous.name.casefold()):
+                preferred[path.parent] = path
+        sources = sorted(preferred.values())
         if not sources:
             msg = (
-                f"No {expected} files found in {source}. "
+                f"No {' or '.join(expected)} files found in {source}. "
                 "Use --recursive to search subfolders."
             )
             raise ConversionError(msg)
     jobs = [
-        ConversionJob(
-            path,
-            output / path.parent.relative_to(root),
-            args.to,
-            args.overwrite,
-            args.trim_copies,
-            args.collapse_singles,
-        )
+        ConversionJob(path, output / path.parent.relative_to(root), args.to,
+                      args.overwrite, args.trim_copies, args.collapse_singles,
+                      args.verify_png, args.optimize_png)
         for path in sources
     ]
     source_folders = {path.parent for path in sources}
@@ -163,28 +177,24 @@ def convert_job(job):
     try:
         if job.destination.exists() and (
             not job.destination.is_dir()
-            or (
-                not job.overwrite
-                and any(not path.is_dir() for path in job.destination.iterdir())
-            )
+            or (not job.overwrite and any(not path.is_dir() for path in job.destination.iterdir()))
         ):
             msg = f"Destination already contains files; use --overwrite to replace them: {job.destination}"
             raise ConversionError(msg)
-        root = ET.parse(job.source).getroot()
-        source_format = "single" if root.find("FrameWidth") is not None else "multi"
-        if source_format == job.target_format:
-            msg_0 = f"Input is already {job.target_format}-sheet data."
-            raise ConversionError(msg_0)
         from conversion import SpriteDocument
         from data import SheetFormat
+        from utils import png_save_options
 
         document = SpriteDocument.load(job.source)
+        source_format = {SheetFormat.NATIVE: "native", SheetFormat.SINGLE: "single", SheetFormat.MULTI: "multi"}[document.sheet_format]
+        if source_format == job.target_format:
+            msg_0 = "Input is already native JSON data." if source_format == "native" else f"Input is already {job.target_format}-sheet data."
+            raise ConversionError(msg_0)
         document.trim_copies = job.trim_copies
         document.collapse_singles = job.collapse_singles
-        target = (
-            SheetFormat.SINGLE if job.target_format == "single" else SheetFormat.MULTI
-        )
-        document.export(job.destination, target)
+        target = {"native": SheetFormat.NATIVE, "single": SheetFormat.SINGLE, "multi": SheetFormat.MULTI}[job.target_format]
+        with png_save_options(verify=job.verify_png, optimize=job.optimize_png):
+            document.export(job.destination, target)
         return ConversionResult(job.source, job.destination)
     except Exception as error:
         return ConversionResult(
@@ -223,27 +233,30 @@ def palette_main(argv: list[str]) -> int:
         prog=f"{Path(sys.argv[0]).name} palette",
         description="Report artwork palette values and translucent pixels without opening the editor.",
     )
-    parser.add_argument("input", type=Path, help="sprite XML file, sprite folder, or PNG sheet")
+    parser.add_argument("input", type=Path, help="sprite JSON/XML file, sprite folder, or PNG sheet")
     args = parser.parse_args(argv)
     source = args.input.resolve()
     try:
         if source.is_dir():
             candidates = [
                 path for path in source.iterdir()
-                if path.is_file() and path.name.casefold() in {"framedata.xml", "animdata.xml"}
+                if path.is_file() and path.name.casefold() in {"sprite.json", "framedata.xml", "animdata.xml"}
             ]
+            native = [path for path in candidates if path.name.casefold() == "sprite.json"]
+            if native:
+                candidates = native
             if len(candidates) != 1:
-                msg = "Choose a sprite XML file directly. The folder must contain exactly one FrameData.xml or AnimData.xml."
+                msg = "Choose a sprite JSON/XML file directly. The folder must contain Sprite.json or exactly one FrameData.xml or AnimData.xml."
                 raise ConversionError(msg)
             source = candidates[0]
         if source.suffix.lower() == ".png":
             with Image.open(source) as image:
                 info = analyze_artwork(image)
-        elif source.suffix.lower() == ".xml":
+        elif source.suffix.lower() in (".xml", ".json"):
             document = SpriteDocument.load(source)
             info = analyze_artwork(document.sheet_image)
         else:
-            msg = "Input must be a sprite XML file, sprite folder, or PNG sheet."
+            msg = "Input must be a sprite JSON/XML file, sprite folder, or PNG sheet."
             raise ConversionError(msg)
     except (ConversionError, FormatError, OSError, ET.ParseError) as error:
         print(f"Could not read palette: {error}", file=sys.stderr)
@@ -266,6 +279,8 @@ def palette_main(argv: list[str]) -> int:
 def main(argv=None):
     multiprocessing.freeze_support()
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "build":
+        return build_main(arguments[1:])
     if arguments and arguments[0] == "palette":
         return palette_main(arguments[1:])
     if arguments and arguments[0] == "convert":
@@ -312,6 +327,45 @@ def main(argv=None):
         print(f"Could not run conversion workers: {error}", file=sys.stderr)
         return 1
     print(f"Converted {successes}; failed {failures}.")
+    return 1 if failures else 0
+
+
+def build_main(argv: list[str]) -> int:
+    """Build sprites recursively using one editable project profile."""
+    from project import build_sprite, load_profile, plan_builds
+    from utils import FormatError, png_save_options
+
+    parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} build",
+        description="Build packed sprites from a source file or folder tree using one YAML project profile.")
+    parser.add_argument("input", type=Path, help="source sprite JSON/XML file or folder (searched recursively)")
+    parser.add_argument("--profile", type=Path, required=True, help="editable project profile YAML")
+    parser.add_argument("-o", "--output", type=Path, required=True, help="destination folder (preserves relative sprite folders)")
+    parser.add_argument("--overwrite", action="store_true", help="replace generated files in an existing output folder")
+    add_png_arguments(parser)
+    args = parser.parse_args(argv)
+    try:
+        profile = load_profile(args.profile)
+        jobs = plan_builds(args.input, args.output)
+        # Protect the shared profile at any generated sprite destination.
+        managed = {"sprite.json", "sprite.png", "palette.json", "build.json"}
+        if (args.profile.name.casefold() in managed and
+            any(args.profile.resolve().parent == job.destination for job in jobs)):
+            raise FormatError("Build output would overwrite the project profile.")
+    except (FormatError, OSError, ValueError, ET.ParseError) as error:
+        print(f"Build failed: {error}", file=sys.stderr)
+        return 1
+    successes = failures = 0
+    for job in jobs:
+        try:
+            with png_save_options(verify=args.verify_png, optimize=args.optimize_png):
+                target = build_sprite(job.source, profile, job.destination, overwrite=args.overwrite)
+        except (FormatError, OSError, ValueError, ET.ParseError) as error:
+            failures += 1
+            print(f"FAILED {job.source}: {error}", file=sys.stderr, flush=True)
+        else:
+            successes += 1
+            print(f"OK {job.source} -> {target}", flush=True)
+    print(f"Built {successes}; failed {failures}.")
     return 1 if failures else 0
 
 

@@ -25,7 +25,7 @@ from data import (
     TLRectangle,
     center_bounds,
 )
-from formats import detect_format, validate_export, validate_source
+from formats import DocumentT, SpriteFormat, detect_adapter, get_adapter, validate_export
 from utils import (
     FormatError,
     check_duplicate_images,
@@ -34,6 +34,7 @@ from utils import (
     integer,
     overlap_colors,
     round_up_to_mult,
+    save_png,
     template_image,
     write_xml,
 )
@@ -239,7 +240,11 @@ class SpriteDocument(AnimationSerialization):
     source_tree: ElementTree.ElementTree | None = field(
         default=None, init=False, repr=False
     )
-    sheet_format: SheetFormat | None = field(default=None, init=False)
+    sheet_format: SheetFormat | str | None = field(default=None, init=False)
+    texture_name: str = "Anim.png"
+    action_point_names: tuple[str, ...] = ()
+    rig_profile: Path | None = None
+    rig_profile_id: str | None = None
 
     def __post_init__(self):
         self.image_grid = ImageGrid(
@@ -281,7 +286,7 @@ class SpriteDocument(AnimationSerialization):
             include(tile.getchannel("A").getbbox(), index)
         for index, body in self.action_points.items():
             dx, dy = shifts.get(index, (0, 0))
-            for point in body.all_pos():
+            for _, point in body.items():
                 half_width = max(half_width, -point.x - dx, point.x + dx + 1)
                 half_height = max(half_height, -point.y - dy, point.y + dy + 1)
         if self.action_pt_image is not None:
@@ -327,7 +332,7 @@ class SpriteDocument(AnimationSerialization):
             if any(not (
                 0 <= point.x + sx + width // 2 < width
                 and 0 <= point.y + sy + height // 2 < height
-            ) for point in body.all_pos()):
+            ) for _, point in body.items()):
                 clipped.add(index)
         if self.action_pt_image is not None:
             grid = ImageGrid(self.action_pt_image, self.frame_width, self.frame_height)
@@ -398,18 +403,37 @@ class SpriteDocument(AnimationSerialization):
         return document
 
     @classmethod
-    def load(cls, path, expected=None):
+    def from_image(
+        cls: type[DocumentT], image: Image.Image, cell_width: int, cell_height: int,
+        *, pad_edges: bool = False,
+    ) -> DocumentT:
+        """Slice an image into cells, retaining every pixel and an empty Default action."""
+        if any(type(value) is not int or value < 1 for value in (cell_width, cell_height)):
+            raise FormatError("Cell width and height must be positive integers.")
+        width, height = image.size
+        padded_width = ((width + cell_width - 1) // cell_width) * cell_width
+        padded_height = ((height + cell_height - 1) // cell_height) * cell_height
+        if (width, height) != (padded_width, padded_height) and not pad_edges:
+            raise FormatError("The image does not divide into complete cells. Adjust the cell size or enable transparent edge padding.")
+        artwork = image.convert("RGBA")
+        if artwork.size != (padded_width, padded_height):
+            padded = Image.new("RGBA", (padded_width, padded_height))
+            padded.paste(artwork, (0, 0))
+            artwork = padded
+        return cls(artwork, cell_width, cell_height, groups=[AnimGroup(0, "Default")])
+
+    @classmethod
+    def load(
+        cls: type[DocumentT],
+        path: str | pathlib.Path,
+        expected: SheetFormat | SpriteFormat | None = None,
+    ) -> DocumentT:
         path = pathlib.Path(path)
-        tree = validate_source(path, expected)
-        root = tree.getroot()
-        if detect_format(root) == SheetFormat.SINGLE:
-            document = cls._load_single(path.parent, root)
-        else:
-            document = cls._load_multi(path.parent, root)
-        document._resolve_copies()
-        document.loaded_action_points = copy.deepcopy(document.action_points)
-        document.source_tree = tree
-        document.sheet_format = detect_format(root)
+        if path.suffix.lower() == ".json" and isinstance(expected, SheetFormat) and expected != SheetFormat.NATIVE:
+            raise FormatError("This is native JSON data; use its matching loader.")
+        adapter = get_adapter(expected) if expected is not None else detect_adapter(path)
+        document = adapter.read(path, cls)
+        document.sheet_format = adapter.document_format
         return document
 
     @staticmethod
@@ -531,6 +555,9 @@ class SpriteDocument(AnimationSerialization):
                     max_width = max(max_width, cropped.width, point_bounds.width)
                     max_height = max(max_height, cropped.height, point_bounds.height)
                     anchor = get_shadow_location_from_pil_image(shadows.crop(box))
+                    if anchor is None:
+                        # Validated empty triplets retain their timeline slot without points.
+                        anchor = Offset(width // 2, height // 2)
                     frame = AnimFrame(
                         len(group.directions[direction].frames),
                         duration=duration,
@@ -563,6 +590,8 @@ class SpriteDocument(AnimationSerialization):
                     y + height // 2 - image.height // 2,
                 ),
             )
+            if not points[index].items():
+                continue
             positions = defaultdict(list)
             for point, color in zip(
                 points[index].all_pos(),
@@ -657,41 +686,47 @@ class SpriteDocument(AnimationSerialization):
         tree = ElementTree.ElementTree(root)
         write_xml(tree, file_name)
 
-    def export(self, directory, format_name, xml_name=None):
+    def export(
+        self,
+        directory: str | pathlib.Path,
+        format_name: SheetFormat | SpriteFormat,
+        filename: str | None = None,
+        *,
+        xml_name: str | None = None,
+    ) -> pathlib.Path:
         """Validate and render the complete bundle before touching its destination."""
         directory = pathlib.Path(directory)
-        xml_name = xml_name or format_name.value
-        if pathlib.Path(xml_name).suffix.lower() != ".xml":
-            raise FormatError("Animation data must be saved as an XML file.")
-        validate_export(self, format_name)
+        adapter = get_adapter(format_name)
+        if filename is not None and xml_name is not None:
+            raise FormatError("Specify filename or the legacy xml_name argument, not both.")
+        filename = filename or xml_name or adapter.default_filename
+        adapter.check_filename(filename)
         # Staging also catches encoding/layout failures before an overwrite.
         directory.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
             prefix="mdframeedit-export-", dir=directory.parent
         ) as temporary:
             stage = pathlib.Path(temporary)
-            if format_name == SheetFormat.SINGLE:
-                self._write_single_sheet(stage)
-            else:
-                self._write_multiple_sheets(stage)
-            validate_source(stage / format_name.value, format_name)
+            adapter.write_bundle(self, stage, filename, directory.resolve())
+            adapter.validate_bundle(stage, filename, type(self), directory.resolve())
+            if not (stage / filename).is_file() or any(not path.is_file() for path in stage.iterdir()):
+                raise FormatError("Format adapters must write a metadata file and flat companion files.")
             directory.mkdir(parents=True, exist_ok=True)
             files = sorted(
-                stage.iterdir(), key=lambda path: path.suffix.lower() == ".xml"
+                stage.iterdir(), key=lambda path: path.name == filename
             )
-            replacements = [
+            replacements: list[tuple[pathlib.Path | None, pathlib.Path]] = [
                 (
                     path,
                     directory
-                    / (xml_name if path.name == format_name.value else path.name),
+                    / path.name,
                 )
                 for path in files
             ]
-            if (
-                format_name == SheetFormat.SINGLE
-                and not (stage / "Offsets.png").exists()
-            ):
-                replacements.append((None, directory / "Offsets.png"))
+            for obsolete in adapter.obsolete_files(stage):
+                if pathlib.Path(obsolete).name != obsolete or obsolete in (".", "..") or (stage / obsolete).exists():
+                    raise FormatError("Invalid obsolete companion filename from format adapter.")
+                replacements.append((None, directory / obsolete))
             backup = stage / "backup"
             backup.mkdir()
             for _, target in replacements:
@@ -725,12 +760,11 @@ class SpriteDocument(AnimationSerialization):
                     msg = f"Save failed. Original file backups are in {rescue}."
                     raise FormatError(msg) from write_error
                 raise
-        return directory / xml_name
+        return directory / filename
 
     def _write_single_sheet(self, directory):
         self.write_single_xml(str(directory / "FrameData.xml"))
-        with open(directory / "Anim.png", "wb") as output:
-            self.sheet_image.save(output, format="PNG")
+        save_png(self.sheet_image, directory / "Anim.png")
         changed_points = {
             index: body
             for index, body in self.action_points.items()
@@ -773,10 +807,9 @@ class SpriteDocument(AnimationSerialization):
                     positions[(x + point.x, y + point.y)].append(color)
                 for position, color in overlap_colors(positions).items():
                     draw.point(position, color)
-            image.save(directory / "Offsets.png")
+            save_png(image, directory / "Offsets.png")
         elif self.action_pt_image is not None:
-            with open(directory / "Offsets.png", "wb") as output:
-                self.action_pt_image.save(output, format="PNG")
+            save_png(self.action_pt_image, directory / "Offsets.png")
 
     def _write_multiple_sheets(self, directory):
         shadow = self.shadow_image
@@ -800,6 +833,9 @@ class SpriteDocument(AnimationSerialization):
                         region = self.image_grid[frame.frame_index]
                         tiles[frame.frame_index] = region
                     tile = tiles[frame.frame_index]
+                    if frame.frame_index not in self.action_points and tile.getbbox() is None:
+                        row.append(None)
+                        continue
                     image = (
                         tile.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
                         if frame.flip
@@ -857,7 +893,10 @@ class SpriteDocument(AnimationSerialization):
             shadows = Image.new("RGBA", size)
             draw = ImageDraw.Draw(offsets)
             for row_index, row in enumerate(prepared):
-                for column, (sprite, sx, sy, points, shadow, mx, my) in enumerate(row):
+                for column, prepared_frame in enumerate(row):
+                    if prepared_frame is None:
+                        continue
+                    sprite, sx, sy, points, shadow, mx, my = prepared_frame
                     cx, cy = (
                         column * width + width // 2,
                         row_index * height + height // 2,
@@ -882,5 +921,5 @@ class SpriteDocument(AnimationSerialization):
                 ("Offsets", offsets),
                 ("Shadow", shadows),
             ):
-                image.save(directory / f"{group.name}-{suffix}.png")
+                save_png(image, directory / f"{group.name}-{suffix}.png")
         self.write_multi_xml(str(directory / "AnimData.xml"), group_sizes)

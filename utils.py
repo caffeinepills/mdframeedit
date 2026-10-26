@@ -2,24 +2,24 @@ from __future__ import annotations
 
 import base64
 import math
+from contextlib import contextmanager
+from contextvars import ContextVar
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PIL import Image, ImageChops, ImageDraw
 
-from data import AnimFrame, ArtworkInfo, Offset, PaletteColor
+from data import AnimFrame, ArtworkInfo, FormatError, Offset, PaletteColor
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterable, Mapping
     from os import PathLike
-    from types import TracebackType
     from xml.etree.ElementTree import Element, ElementTree
 
-    from pyglet.image import AbstractImage, ImageData
+    from pyglet.image import AbstractImage
 
     from data import ActionPoints, Rectangle, TLRectangle
-    from main import PygletWidget
 
 _TEMPLATE_PNG = (
     "iVBORw0KGgoAAAANSUhEUgAAABYAAAAICAYAAAD9aA/QAAAABGdBTUEAALGPC/xhBQ"
@@ -40,13 +40,77 @@ def write_xml(
         if encoding:
             tree.write(file_name, encoding="utf-8", xml_declaration=True)
         else:
-            output.write(b'<?xml version="1.0" ?>\n')
+            output.write(b'<?xml version="1.0"?>\n')
             tree.write(output, encoding="utf-8", xml_declaration=False)
 
 
 def template_image() -> Image.Image:
     with Image.open(BytesIO(base64.b64decode(_TEMPLATE_PNG))) as source:
         return source.convert("RGBA")
+
+
+_PNG_SAVE_OPTIONS = ContextVar("png_save_options", default=(True, True))
+
+
+@contextmanager
+def png_save_options(*, verify: bool = True, optimize: bool = True):
+    """Scope PNG settings to one conversion, without affecting other callers."""
+    token = _PNG_SAVE_OPTIONS.set((verify, optimize))
+    try:
+        yield
+    finally:
+        _PNG_SAVE_OPTIONS.reset(token)
+
+
+def save_png(
+    image: Image.Image, path: str | PathLike[str], *,
+    verify: bool | None = None, optimize: bool | None = None,
+    allow_palette: bool = True,
+) -> None:
+    """Save exact RGBA pixels, using an indexed PNG only when it is smaller.
+
+    Palette entries are exact RGBA values, never quantized or dithered. Verify
+    encoded pixels before writing so callers' staged bundles remain lossless.
+    """
+    default_verify, default_optimize = _PNG_SAVE_OPTIONS.get()
+    verify = default_verify if verify is None else verify
+    optimize = default_optimize if optimize is None else optimize
+    rgba = image.convert("RGBA")
+    pixels = rgba.tobytes() if verify else None
+
+    def encode(source, **options):
+        output = BytesIO()
+        source.save(output, format="PNG", optimize=optimize, **options)
+        return output.getvalue()
+
+    def matches(encoded):
+        try:
+            with Image.open(BytesIO(encoded)) as decoded:
+                return decoded.size == rgba.size and decoded.convert("RGBA").tobytes() == pixels
+        except (OSError, ValueError):
+            return False
+
+    encoded = encode(rgba)
+    if verify and not matches(encoded):
+        raise FormatError("PNG verification failed: encoded pixels differ from the source.")
+    colors = rgba.getcolors(256) if optimize and allow_palette else None
+    if colors:
+        # Most frequent first, with deterministic ties; alpha variants have their
+        # own entries, including RGB values underneath fully transparent pixels.
+        palette = [color for count, color in sorted(colors, key=lambda item: (-item[0], item[1]))]
+        indices = {color: index for index, color in enumerate(palette)}
+        indexed = Image.frombytes("P", rgba.size, bytes(indices[pixel] for pixel in rgba.get_flattened_data()))
+        indexed.putpalette(bytes(channel for color in palette for channel in color[:3]))
+        indexed.info = rgba.info.copy()
+        indexed.info.pop("transparency", None)
+        bits = next(depth for depth in (1, 2, 4, 8) if len(palette) <= 2 ** depth)
+        options = {"bits": bits}
+        if any(color[3] != 255 for color in palette):
+            options["transparency"] = bytes(color[3] for color in palette)
+        candidate = encode(indexed, **options)
+        if len(candidate) < len(encoded) and (not verify or matches(candidate)):
+            encoded = candidate
+    Path(path).write_bytes(encoded)
 
 
 def analyze_artwork(image: Image.Image) -> ArtworkInfo:
@@ -83,10 +147,6 @@ def shadow_image(size: int, black: bool = False) -> Image.Image:
         ]
     )
     return image
-
-
-class FormatError(ValueError):
-    """Error for when there is a failure to format the XML data."""
 
 
 def integer(element: Element, tag: str, default: int | None = None) -> int:
@@ -131,50 +191,6 @@ def get_image_size(path: str | PathLike[str]) -> tuple[int, int]:
         raise FormatError(msg) from error
 
 
-class Camera:
-    def __init__(
-        self, glWidget: PygletWidget, position: tuple[float, float],
-    ) -> None:
-        self.glWidget = glWidget
-        self.x, self.y = position
-        self._zoom = 1.0
-
-    @property
-    def zoom(self) -> float:
-        return self._zoom
-
-    @zoom.setter
-    def zoom(self, value: float) -> None:
-        self._zoom = max(min(value, 4.0), 0.25)
-
-    def __enter__(self) -> None:
-        self.begin()
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
-        self.end()
-
-    def begin(self) -> None:
-        x = -(self.glWidget.width() // 2) / self._zoom + self.x
-        y = -(self.glWidget.height() // 3) / self._zoom + self.y
-
-        view_matrix = self.glWidget.view.translate(
-            (-x * self._zoom, -y * self._zoom, 0)
-        )
-        view_matrix = view_matrix.scale((self._zoom, self._zoom, 1))
-        self.glWidget.view = view_matrix
-
-    def end(self) -> None:
-        x = -(self.glWidget.width() // 2) / self._zoom + self.x
-        y = -(self.glWidget.height() // 3) / self._zoom + self.y
-
-        view_matrix = self.glWidget.view.scale((1 / self._zoom, 1 / self._zoom, 1))
-        view_matrix = view_matrix.translate((x * self._zoom, y * self._zoom, 0))
-        self.glWidget.view = view_matrix
 
 
 def check_duplicate_images(
@@ -343,24 +359,6 @@ def get_action_points_from_pil_image(
     return r, g, b, black
 
 
-def create_plus_image(size: int, color: tuple[int, int, int, int]) -> ImageData:
-    import pyglet
-
-    # Create a new image with a white background
-    dimensions = (size, size)
-    image = Image.new("RGBA", dimensions, (0, 0, 0, 0))
-
-    draw = ImageDraw.Draw(image)
-
-    center = (size // 2, size // 2)
-    draw.line(
-        [(center[0] - 2, center[1]), (center[0] + 2, center[1])], fill=color, width=1
-    )
-    draw.line(
-        [(center[0], center[1] - 2), (center[0], center[1] + 2)], fill=color, width=1
-    )
-
-    return pyglet.image.ImageData(image.width, image.height, "RGBA", image.tobytes())
 
 
 def overlap_colors(

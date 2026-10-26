@@ -7,6 +7,130 @@ from PySide6.QtCore import Qt
 from data import VERSION
 
 
+class CollapsibleGroupBox(QtWidgets.QGroupBox):
+    """A native group whose title folds its controls without disabling them."""
+
+    collapsed_changed = QtCore.Signal(bool)
+
+    def __init__(self, title="", parent=None):
+        if isinstance(title, QtWidgets.QWidget):
+            parent, title = title, ""
+        super().__init__(parent)
+        self._collapsed = False
+        self._title = ""
+        self._hidden_children = []
+        self._expanded_width = 0
+        self.compact_when_collapsed = False
+        self._expanded_limits = (0, 16777215)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setTitle(title)
+
+    def setTitle(self, title):
+        self._title = title
+        # Reserve room for a style-painted arrow, independent of font glyphs.
+        super().setTitle("    " + title)
+        self.setAccessibleName(title)
+        self.setAccessibleDescription("Collapsed" if self._collapsed else "Expanded")
+
+    def title(self):
+        return self._title
+
+    def is_collapsed(self):
+        return self._collapsed
+
+    def header_rect(self):
+        option = QtWidgets.QStyleOptionGroupBox()
+        self.initStyleOption(option)
+        return self.style().subControlRect(QtWidgets.QStyle.ComplexControl.CC_GroupBox, option,
+                                          QtWidgets.QStyle.SubControl.SC_GroupBoxLabel, self).adjusted(-4, -3, 4, 3)
+
+    def collapsed_height(self):
+        return self.fontMetrics().lineSpacing() + 10
+
+    def set_collapsed(self, collapsed):
+        collapsed = bool(collapsed)
+        if collapsed == self._collapsed:
+            return
+        if collapsed:
+            self._expanded_width = super().minimumSizeHint().width()
+            self._expanded_limits = (self.minimumHeight(), self.maximumHeight())
+            self._hidden_children = []
+            for child in self.findChildren(QtWidgets.QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly):
+                policy = child.sizePolicy()
+                self._hidden_children.append((child, child.isHidden(), policy.retainSizeWhenHidden()))
+                policy.setRetainSizeWhenHidden(False)
+                child.setSizePolicy(policy)
+                child.hide()
+            self._collapsed = True
+            self.setFixedHeight(self.collapsed_height())
+        else:
+            self._collapsed = False
+            self.setMinimumHeight(self._expanded_limits[0])
+            self.setMaximumHeight(self._expanded_limits[1])
+            for child, hidden, retain in self._hidden_children:
+                policy = child.sizePolicy()
+                policy.setRetainSizeWhenHidden(retain)
+                child.setSizePolicy(policy)
+                child.setVisible(not hidden)
+            self._hidden_children = []
+        self.setAccessibleDescription("Collapsed" if collapsed else "Expanded")
+        if self.layout():
+            self.layout().invalidate()
+        self.updateGeometry()
+        self.update()
+        self.collapsed_changed.emit(collapsed)
+
+    def minimumSizeHint(self):
+        if self._collapsed:
+            width = (self.fontMetrics().horizontalAdvance("    " + self._title) + 20
+                     if self.compact_when_collapsed else self._expanded_width)
+            return QtCore.QSize(width, self.collapsed_height())
+        return super().minimumSizeHint()
+
+    def sizeHint(self):
+        return self.minimumSizeHint() if self._collapsed else super().sizeHint()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.header_rect().contains(event.position().toPoint()):
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.set_collapsed(not self._collapsed)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.set_collapsed(not self._collapsed)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        option = QtWidgets.QStyleOption()
+        option.initFrom(self)
+        header = self.header_rect()
+        extent = min(self.fontMetrics().height(), 12)
+        option.rect = QtCore.QRect(header.left() + 4, header.center().y() - extent // 2, extent, extent)
+        painter = QtGui.QPainter(self)
+        arrow = (QtWidgets.QStyle.PrimitiveElement.PE_IndicatorArrowRight if self._collapsed
+                 else QtWidgets.QStyle.PrimitiveElement.PE_IndicatorArrowDown)
+        self.style().drawPrimitive(arrow, option, painter, self)
+        if self.hasFocus():
+            focus = QtWidgets.QStyleOptionFocusRect()
+            focus.initFrom(self)
+            focus.rect = header
+            self.style().drawPrimitive(QtWidgets.QStyle.PrimitiveElement.PE_FrameFocusRect,
+                                       focus, painter, self)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if (getattr(self, "_collapsed", False)
+                and event.type() in (QtCore.QEvent.Type.FontChange, QtCore.QEvent.Type.StyleChange)):
+            self.setFixedHeight(self.collapsed_height())
+            self.updateGeometry()
+
+
 class EditorButton(QtWidgets.QPushButton):
     def _buttonSize(self, preferred):
         metrics = self.fontMetrics()
@@ -168,7 +292,7 @@ class DirectionButton(EditorButton):
 
 
 class PlaybackButton(EditorButton):
-    """Large play/pause shapes drawn with Qt, without platform font glyphs."""
+    """Compact play/pause control drawn with Qt, without platform font glyphs."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -182,12 +306,12 @@ class PlaybackButton(EditorButton):
         self.update()
 
     def sizeHint(self):
-        extent = max(super().sizeHint().height(), round(self.fontMetrics().height() * 2.6))
-        return QtCore.QSize(extent, extent)
+        height = max(QtWidgets.QPushButton.sizeHint(self).height(), round(self.fontMetrics().height() * 1.8))
+        return QtCore.QSize(max(height, round(self.fontMetrics().height() * 2.6)), height)
 
     def minimumSizeHint(self):
-        extent = max(super().minimumSizeHint().height(), round(self.fontMetrics().height() * 2.2))
-        return QtCore.QSize(extent, extent)
+        height = max(QtWidgets.QPushButton.minimumSizeHint(self).height(), round(self.fontMetrics().height() * 1.5))
+        return QtCore.QSize(max(height, round(self.fontMetrics().height() * 2.2)), height)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -380,6 +504,22 @@ class OnionRangeSlider(QtWidgets.QWidget):
             painter.restore()
 
 
+class ElidedLabel(QtWidgets.QLabel):
+    """Keep plain-text lines compact without forcing wider editor panels."""
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        area = self.contentsRect()
+        metrics = self.fontMetrics()
+        lines = self.text().splitlines()
+        top = area.top() + max(0, (area.height() - len(lines) * metrics.height()) // 2)
+        for index, line in enumerate(lines):
+            rectangle = QtCore.QRect(area.left(), top + index * metrics.height(), area.width(), metrics.height())
+            painter.drawText(rectangle, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             metrics.elidedText(line, Qt.TextElideMode.ElideRight, area.width()))
+
+
 class SliderTickLabels(QtWidgets.QWidget):
     """Place labels at Qt's actual slider handle positions, including DPI scaling."""
 
@@ -411,6 +551,14 @@ class SliderTickLabels(QtWidgets.QWidget):
             left = max(0, min(offset + handle.center().x() - width // 2, self.width() - width))
             painter.drawText(QtCore.QRect(left, 0, width, self.height()),
                              Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, label)
+
+
+class ResponsiveSplitter(QtWidgets.QSplitter):
+    resized = QtCore.Signal()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.resized.emit()
 
 
 class ResponsiveEditorPanel(QtWidgets.QWidget):
@@ -465,8 +613,10 @@ class SheetFramePreview(QtWidgets.QLabel):
         self.frameImage = QtGui.QImage()
         self.artworkBounds = QtCore.QRectF()
         self.points = []
+        self.selectedPoint: int | None = None
         self.pointsVisible = True
         self.pointsOpacity = 255
+        self.pointMarkerSize = 1
         self.includeWhitespace = False
         self.showBounds = False
         self.dragPoint: int | None = None
@@ -513,7 +663,8 @@ class SheetFramePreview(QtWidgets.QLabel):
         bounds = QtCore.QRectF(self.artworkBounds)
         if self.pointsVisible:
             for x, y, color in self.points:
-                markerBounds = QtCore.QRectF(x - 1, y - 1, 3, 3)
+                radius = self.pointMarkerSize
+                markerBounds = QtCore.QRectF(x - radius, y - radius, 2 * radius + 1, 2 * radius + 1)
                 bounds = bounds.united(markerBounds)
                 cellBounds = cellBounds.united(markerBounds)
         available = QtCore.QRectF(self.contentsRect().adjusted(6, 6, -6, -6))
@@ -608,6 +759,13 @@ class SheetFramePreview(QtWidgets.QLabel):
             for x, y, color in self.points:
                 pixel = QtCore.QRectF(origin.x() + x * scale, origin.y() + y * scale, scale, scale)
                 painter.fillRect(pixel, QtGui.QColor(*color))
+            if self.selectedPoint is not None and self.selectedPoint < len(self.points):
+                x, y, _ = self.points[self.selectedPoint]
+                pixel = QtCore.QRectF(origin.x() + x * scale, origin.y() + y * scale, scale, scale)
+                painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255), 2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                padding = 2 + (self.pointMarkerSize - 1) * scale
+                painter.drawRect(pixel.adjusted(-padding, -padding, padding, padding))
         if self.showBounds:
             painter.setOpacity(1)
             painter.setPen(QtGui.QPen(QtGui.QColor(255, 220, 0), 1))
@@ -688,6 +846,8 @@ class Ui_MainWindow:
         self.groupBox_4 = QtWidgets.QGroupBox(self.libraryPanel)
         self.groupBox_4.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
         self.actionLibraryLayout = makeLayout(QtWidgets.QHBoxLayout, self.groupBox_4)
+        self.actionLibraryLayout.setContentsMargins(6, 0, 6, 4)
+        self.actionLibraryLayout.setSpacing(4)
         self.actionListWidget = TextWidthListWidget(self.groupBox_4, characters=24)
         self.actionLibraryLayout.addWidget(self.actionListWidget)
         self.actionButtonsLayout = makeLayout(QtWidgets.QVBoxLayout)
@@ -701,11 +861,14 @@ class Ui_MainWindow:
 
         self.groupBox_5 = QtWidgets.QGroupBox(self.libraryPanel)
         self.horizontalLayout_10 = makeLayout(QtWidgets.QHBoxLayout, self.groupBox_5)
+        self.horizontalLayout_10.setContentsMargins(6, 0, 6, 4)
+        self.horizontalLayout_10.setSpacing(4)
         self.sheetLibraryPanel = QtWidgets.QWidget(self.groupBox_5)
         self.sheetLibraryLayout = makeLayout(QtWidgets.QVBoxLayout, self.sheetLibraryPanel)
         self.sheetLibraryLayout.setContentsMargins(0, 0, 0, 0)
         self.sheetFramesGroupBox = QtWidgets.QGroupBox(self.sheetLibraryPanel)
         self.sheetFramesLayout = makeLayout(QtWidgets.QVBoxLayout, self.sheetFramesGroupBox)
+        self.sheetFramesLayout.setContentsMargins(4, 0, 4, 4)
         self.loadedSheetFrameList = TextWidthListWidget(self.sheetFramesGroupBox, sampleText="Frame 100")
         self.sheetFramesLayout.addWidget(self.loadedSheetFrameList)
         self.sheetLibraryLayout.addWidget(self.sheetFramesGroupBox, 1)
@@ -721,31 +884,105 @@ class Ui_MainWindow:
         self.horizontalLayout_12.addWidget(self.sheetFramePicture)
         self.sheetImageLayout.addWidget(self.frame, 1)
         self.horizontalLayout_10.addWidget(self.sheetImagePanel, 1)
-        self.actionPointsGroupBox = QtWidgets.QGroupBox(self.groupBox_5)
+        self.actionPointsGroupBox = CollapsibleGroupBox(self.groupBox_5)
         self.actionPointsLayout = makeLayout(QtWidgets.QVBoxLayout, self.actionPointsGroupBox)
+        self.actionPointsLayout.setContentsMargins(6, 0, 6, 4)
+        self.actionPointsLayout.setSpacing(3)
+        self.showActionPointsCheckBox = QtWidgets.QCheckBox(self.actionPointsGroupBox)
+        self.showActionPointsCheckBox.setChecked(False)
+        self.showActionPointsCheckBox.setAccessibleName("Show action points")
         self.sheetFrameScopeLabel = QtWidgets.QLabel(self.actionPointsGroupBox)
-        self.actionPointsLayout.addWidget(self.sheetFrameScopeLabel)
-        self.actionPointsGrid = makeLayout(QtWidgets.QGridLayout)
-        self.actionPointXLabel = QtWidgets.QLabel("X:", self.actionPointsGroupBox)
-        self.actionPointYLabel = QtWidgets.QLabel("Y:", self.actionPointsGroupBox)
-        self.actionPointsGrid.addWidget(self.actionPointXLabel, 0, 1)
-        self.actionPointsGrid.addWidget(self.actionPointYLabel, 0, 2)
+        self.sheetFrameScopeLabel.setToolTip("Points belong to this sheet frame and are shared by every animation entry using its artwork.")
+        pointScopeRow = makeLayout(QtWidgets.QHBoxLayout)
+        pointScopeRow.addWidget(self.showActionPointsCheckBox)
+        pointScopeRow.addStretch(1)
+        pointScopeRow.addWidget(self.sheetFrameScopeLabel)
+        self.actionPointsLayout.addLayout(pointScopeRow)
+        rigProfileRow = makeLayout(QtWidgets.QHBoxLayout)
+        self.projectRigComboBox = QtWidgets.QComboBox(self.actionPointsGroupBox)
+        self.projectRigComboBox.setObjectName("projectRigComboBox")
+        self.projectRigComboBox.setAccessibleName("Project rig profile")
+        self.projectRigComboBox.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.projectRigComboBox.setMinimumContentsLength(16)
+        self.projectRigComboBox.setToolTip("Choose a rig from the loaded project for this sprite. None unlinks the profile without changing authored coordinates.")
+        self.projectRigComboBox.hide()
+        rigProfileRow.addWidget(self.projectRigComboBox, 1)
+        self.loadRigProfileButton = QtWidgets.QPushButton("Load Profile…", self.actionPointsGroupBox)
+        self.unlinkRigProfileButton = QtWidgets.QPushButton("Unlink", self.actionPointsGroupBox)
+        self.loadRigProfileButton.setAccessibleName("Load Rig Profile")
+        self.loadRigProfileButton.setToolTip("Choose a named rig from a YAML Project Profile, or load a standalone YAML Rig Profile.")
+        self.unlinkRigProfileButton.setAccessibleName("Unlink Rig Profile")
+        self.unlinkRigProfileButton.setToolTip("Remove this profile reference, retaining authored Action Point coordinates.")
+        rigProfileRow.addWidget(self.loadRigProfileButton, 1)
+        rigProfileRow.addWidget(self.unlinkRigProfileButton)
+        self.rigProfileStatusLabel = QtWidgets.QLabel(self.actionPointsGroupBox)
+        self.rigProfileStatusLabel.setAccessibleName("Rig profile suggestions and warnings")
+        statusIconSize = self.actionPointsGroupBox.style().pixelMetric(QtWidgets.QStyle.PixelMetric.PM_SmallIconSize)
+        self.rigProfileStatusLabel.setPixmap(self.actionPointsGroupBox.style().standardIcon(
+            QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning).pixmap(statusIconSize, statusIconSize))
+        self.rigProfileStatusLabel.setFixedSize(statusIconSize, statusIconSize)
+        self.rigProfileStatusLabel.hide()
+        rigProfileRow.addWidget(self.rigProfileStatusLabel)
+        self.actionPointsLayout.addLayout(rigProfileRow)
+        pointNames = makeLayout(QtWidgets.QHBoxLayout)
+        self.actionPointComboBox = QtWidgets.QComboBox(self.actionPointsGroupBox)
+        self.actionPointComboBox.setAccessibleName("Action Point name")
+        self.addActionPointButton = QtWidgets.QToolButton(self.actionPointsGroupBox)
+        self.addActionPointButton.setText("+")
+        self.addActionPointButton.setToolTip("Add a sprite-local Action Point name")
+        pointNames.addWidget(self.actionPointComboBox, 1)
+        pointNames.addWidget(self.addActionPointButton)
+        self.actionPointsLayout.addLayout(pointNames)
+        self.pointDefinedCheckBox = QtWidgets.QCheckBox("Set on this frame", self.actionPointsGroupBox)
+        self.pointDefinedCheckBox.setToolTip("Unset means no point on this sheet frame. A point at X=0, Y=0 is defined at the cell center.")
+        namedCoordinates = makeLayout(QtWidgets.QHBoxLayout)
+        namedCoordinates.addWidget(self.pointDefinedCheckBox)
+        self.namedPointSpinBoxes = []
+        for axis in ("X", "Y"):
+            namedCoordinates.addWidget(QtWidgets.QLabel(axis + ":", self.actionPointsGroupBox))
+            spin = makeSpinBox("namedPoint" + axis, self.actionPointsGroupBox, -32768)
+            spin.setMaximum(32767)
+            spin.setAccessibleName("Selected Action Point " + axis)
+            spin.setToolTip("Pixels from the sheet cell center; positive X is right and positive Y is down. Coordinates follow the original artwork before mirroring.")
+            namedCoordinates.addWidget(spin)
+            self.namedPointSpinBoxes.append(spin)
+        self.actionPointsLayout.addLayout(namedCoordinates)
+        self.actionPointsPreviewGroupBox = QtWidgets.QWidget(self.actionPointsGroupBox)
+        pointOpacityLayout = makeLayout(QtWidgets.QHBoxLayout, self.actionPointsPreviewGroupBox)
+        pointOpacityLayout.setContentsMargins(0, 0, 0, 0)
+        pointOpacityLabel, pointOpacitySlider = makeOpacityControls("actionPoints", self.actionPointsPreviewGroupBox)
+        pointOpacityLabel.setText("100%")
+        pointOpacityTitle = QtWidgets.QLabel("Opacity", self.actionPointsPreviewGroupBox)
+        pointOpacityTitle.setBuddy(pointOpacitySlider)
+        pointOpacityLayout.addWidget(pointOpacityTitle)
+        pointOpacityLayout.addWidget(pointOpacitySlider, 1)
+        pointOpacityLayout.addWidget(pointOpacityLabel)
+        pointSizeTitle = QtWidgets.QLabel("Size", self.actionPointsPreviewGroupBox)
+        self.actionPointsSizeSlider = ClickableSlider(Qt.Orientation.Horizontal, self.actionPointsPreviewGroupBox)
+        self.actionPointsSizeSlider.setRange(1, 3)
+        self.actionPointsSizeSlider.setValue(1)
+        self.actionPointsSizeSlider.setPageStep(1)
+        self.actionPointsSizeSlider.setAccessibleName("Action point marker size")
+        self.actionPointsSizeSlider.setToolTip(
+            "Magenta arm length: 1, 2 or 3 pixels. Also grows the upper preview's selection outline; the colored center stays one pixel.")
+        pointSizeTitle.setBuddy(self.actionPointsSizeSlider)
+        self.actionPointsSizeLabel = QtWidgets.QLabel("1", self.actionPointsPreviewGroupBox)
+        pointOpacityLayout.addWidget(pointSizeTitle)
+        pointOpacityLayout.addWidget(self.actionPointsSizeSlider, 1)
+        pointOpacityLayout.addWidget(self.actionPointsSizeLabel)
+        self.actionPointsLayout.addWidget(self.actionPointsPreviewGroupBox)
         self.actionPointSpinBoxes = {}
         for row, pointName, title in ((1, "leftHand", "Left hand"), (2, "rightHand", "Right hand"),
                                       (3, "head", "Head"), (4, "center", "Center")):
-            self.actionPointsGrid.addWidget(QtWidgets.QLabel(title, self.actionPointsGroupBox), row, 0)
             spinBoxes = []
             for column, axis in ((1, "X"), (2, "Y")):
                 spinBox = makeSpinBox(pointName + axis + "SpinBox", self.actionPointsGroupBox, -32768)
                 spinBox.setMaximum(32767)
                 spinBox.setEnabled(False)
                 spinBox.setAccessibleName(title + " " + axis + " offset")
-                self.actionPointsGrid.addWidget(spinBox, row, column)
+                spinBox.hide()  # Legacy control bindings; named selector is the visible editor.
                 spinBoxes.append(spinBox)
             self.actionPointSpinBoxes[pointName] = tuple(spinBoxes)
-        self.actionPointsGrid.setColumnStretch(1, 1)
-        self.actionPointsGrid.setColumnStretch(2, 1)
-        self.actionPointsLayout.addLayout(self.actionPointsGrid)
         self.actionPointsLayout.addStretch(1)
         self.horizontalLayout_10.addWidget(self.actionPointsGroupBox)
         self.horizontalLayout_8.addWidget(self.groupBox_5, 1)
@@ -756,7 +993,7 @@ class Ui_MainWindow:
         self.editorLayout.setContentsMargins(0, 0, 0, 0)
         self.editorLayout.setRowStretch(0, 1)
         self.editorLayout.setColumnStretch(0, 1)
-        self.previewSplitter = QtWidgets.QSplitter(Qt.Orientation.Horizontal)
+        self.previewSplitter = ResponsiveSplitter(Qt.Orientation.Horizontal)
         self.previewSplitter.setChildrenCollapsible(False)
         self.previewSplitter.setHandleWidth(6)
         self.verticalFrame_3 = QtWidgets.QFrame()
@@ -779,8 +1016,10 @@ class Ui_MainWindow:
         self.viewControlsLayout = makeLayout(QtWidgets.QGridLayout, self.viewControlsPanel)
         self.viewControlsLayout.setContentsMargins(0, 0, 0, 0)
         self.viewControlsLayout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetNoConstraint)
-        self.groupBox_6 = QtWidgets.QGroupBox(self.verticalFrame_3)
+        self.groupBox_6 = CollapsibleGroupBox(self.verticalFrame_3)
         self.verticalLayout_9 = makeLayout(QtWidgets.QGridLayout, self.groupBox_6)
+        self.verticalLayout_9.setContentsMargins(6, 0, 6, 4)
+        self.verticalLayout_9.setSpacing(3)
         self.animationSpeedSlider = ClickableSlider(Qt.Orientation.Horizontal, self.groupBox_6)
         self.animationSpeedSlider.setMaximum(4)
         self.animationSpeedSlider.setValue(3)
@@ -790,13 +1029,22 @@ class Ui_MainWindow:
         self.speedTickLabels = SliderTickLabels(self.animationSpeedSlider,
                                                ("0.1x", "0.25x", "0.5x", "1x", "2x"), self.groupBox_6)
         self.verticalLayout_9.addWidget(self.speedTickLabels, 1, 0)
-        self.playbackOptionsLayout = makeLayout(QtWidgets.QHBoxLayout)
-        self.playbackOptionsLayout.addWidget(self.groupBox_6, 1)
-        self.onionPreviewGroupBox = QtWidgets.QGroupBox("Onion", self.verticalFrame_3)
+        self.playbackOptionsPanel = QtWidgets.QWidget(self.verticalFrame_3)
+        self.playbackOptionsPanel.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+                                                QtWidgets.QSizePolicy.Policy.Maximum)
+        self.playbackOptionsLayout = makeLayout(QtWidgets.QHBoxLayout, self.playbackOptionsPanel)
+        self.playbackOptionsLayout.setContentsMargins(0, 0, 0, 0)
+        self.playbackOptionsLayout.addWidget(self.groupBox_6, 1, Qt.AlignmentFlag.AlignTop)
+        self.onionPreviewGroupBox = CollapsibleGroupBox("Onion", self.verticalFrame_3)
         self.onionPreviewLayout = makeLayout(QtWidgets.QVBoxLayout, self.onionPreviewGroupBox)
+        self.onionPreviewLayout.setContentsMargins(6, 0, 6, 4)
+        self.onionPreviewLayout.setSpacing(3)
         self.onionPreviewCheckBox = QtWidgets.QCheckBox("Show", self.onionPreviewGroupBox)
         self.onionHeaderLayout = makeLayout(QtWidgets.QHBoxLayout)
         self.onionHeaderLayout.addWidget(self.onionPreviewCheckBox)
+        self.onionShadowsCheckBox = QtWidgets.QCheckBox("Shadows", self.onionPreviewGroupBox)
+        self.onionShadowsCheckBox.setToolTip("Include neighboring frame shadows in onion skinning.")
+        self.onionHeaderLayout.addWidget(self.onionShadowsCheckBox)
         self.onionHeaderLayout.addStretch()
         self.onionRangeLabel = QtWidgets.QLabel("-1 to +1", self.onionPreviewGroupBox)
         self.onionHeaderLayout.addWidget(self.onionRangeLabel)
@@ -813,31 +1061,34 @@ class Ui_MainWindow:
         self.onionOpacityLayout.addWidget(opacitySlider, 1)
         self.onionOpacityLayout.addWidget(opacityLabel)
         self.onionPreviewLayout.addLayout(self.onionOpacityLayout)
-        self.playbackOptionsLayout.addWidget(self.onionPreviewGroupBox, 1)
-        self.gridLayout.addLayout(self.playbackOptionsLayout, 2, 0)
-        self.previewGroupBox = QtWidgets.QGroupBox(self.viewControlsPanel)
-        self.previewLayout = makeLayout(QtWidgets.QHBoxLayout, self.previewGroupBox)
-        self.previewLayout.setContentsMargins(9, 0, 9, 6)
-        self.previewLayout.setSpacing(4)
-        for name, title in (("sprite", "Sprite"), ("shadow", "Shadow"), ("actionPoints", "Action Points")):
-            group = QtWidgets.QGroupBox(title, self.previewGroupBox)
+        self.playbackOptionsLayout.addWidget(self.onionPreviewGroupBox, 1, Qt.AlignmentFlag.AlignTop)
+        for name, title in (("sprite", "Sprite"), ("shadow", "Shadow")):
+            group = CollapsibleGroupBox(title, self.playbackOptionsPanel)
             groupLayout = makeLayout(QtWidgets.QVBoxLayout, group)
-            groupLayout.setContentsMargins(6, 0, 6, 6)
+            groupLayout.setContentsMargins(4, 0, 4, 3)
+            groupLayout.setSpacing(2)
             label, slider = makeOpacityControls(name, group)
             label.setText("100%")
             label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             slider.setAccessibleName(title + " preview opacity")
             opacityRow = makeLayout(QtWidgets.QHBoxLayout)
-            opacityRow.addWidget(QtWidgets.QLabel("Opacity", group))
-            opacityRow.addStretch(1)
+            opacityTitle = QtWidgets.QLabel("Opacity", group)
+            opacityTitle.setBuddy(slider)
+            opacityRow.addWidget(opacityTitle)
+            opacityRow.addWidget(slider, 1)
             opacityRow.addWidget(label)
             groupLayout.addLayout(opacityRow)
-            groupLayout.addWidget(slider)
             if name == "shadow":
                 self.previewShadowCheckBox = QtWidgets.QCheckBox("Preview", group)
-                self.previewShadowCheckBox.setToolTip("Show actual shadow size as black.")
+                self.previewShadowCheckBox.setToolTip("Show actual shadow size using the selected preview color.")
                 self.shadowPreviewOptionsLayout = makeLayout(QtWidgets.QHBoxLayout)
                 self.shadowPreviewOptionsLayout.addWidget(self.previewShadowCheckBox)
+                self.shadowColorButton = QtWidgets.QToolButton(group)
+                self.shadowColorButton.setObjectName("shadowColorButton")
+                self.shadowColorButton.setFixedSize(22, 22)
+                self.shadowColorButton.setAccessibleName("Shadow preview color")
+                self.shadowColorButton.setToolTip("Choose shadow preview color")
+                self.shadowPreviewOptionsLayout.addWidget(self.shadowColorButton)
                 self.shadowSizeComboBox = QtWidgets.QComboBox(group)
                 self.shadowSizeComboBox.addItems(["Small", "Medium", "Large"])
                 self.shadowSizeComboBox.setAccessibleName("Shadow size")
@@ -846,14 +1097,13 @@ class Ui_MainWindow:
                 )
                 self.shadowPreviewOptionsLayout.addWidget(self.shadowSizeComboBox, 1)
                 groupLayout.addLayout(self.shadowPreviewOptionsLayout)
-            elif name == "actionPoints":
-                self.showActionPointsCheckBox = QtWidgets.QCheckBox(group)
-                self.showActionPointsCheckBox.setChecked(False)
-                self.showActionPointsCheckBox.setAccessibleName("Show action points")
-                groupLayout.addWidget(self.showActionPointsCheckBox)
-            groupLayout.addStretch(1)
             setattr(self, name + "PreviewGroupBox", group)
-            self.previewLayout.addWidget(group, 1)
+            self.playbackOptionsLayout.addWidget(group, 1, Qt.AlignmentFlag.AlignTop)
+        for group in (self.groupBox_6, self.onionPreviewGroupBox,
+                      self.spritePreviewGroupBox, self.shadowPreviewGroupBox):
+            group.compact_when_collapsed = True
+            group.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum)
+        self.gridLayout.addWidget(self.playbackOptionsPanel, 2, 0)
         self.previewSplitter.addWidget(self.verticalFrame_3)
 
         self.inspectorPanel = QtWidgets.QGroupBox()
@@ -885,6 +1135,10 @@ class Ui_MainWindow:
             self.directionRotationLayout.addWidget(button)
         self.directionRotationLayout.addStretch(1)
         self.gridLayout_2.addLayout(self.directionRotationLayout, 3, 0, 1, 3)
+        self.keepDirectionFrameCheckBox = QtWidgets.QCheckBox("Retain Frame", self.directionGroupBox)
+        self.keepDirectionFrameCheckBox.setObjectName("keepDirectionFrameCheckBox")
+        self.keepDirectionFrameCheckBox.setToolTip("Keep the current frame when changing direction. Shorter sequences use their last frame.")
+        self.gridLayout_2.addWidget(self.keepDirectionFrameCheckBox, 4, 0, 1, 3)
         self.shadowOffsetScopeLabel = QtWidgets.QLabel(self.inspectorPanel)
         self.frameHeaderLayout = makeLayout(QtWidgets.QHBoxLayout)
         self.frameHeaderLayout.addStretch(1)
@@ -895,11 +1149,18 @@ class Ui_MainWindow:
         self.verticalLayout_3 = makeLayout(QtWidgets.QVBoxLayout, self.groupBox_7)
         self.frameForm = makeLayout(QtWidgets.QFormLayout)
         self.frameForm.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.pointPreviewDetailsLabel = ElidedLabel(self.groupBox_7)
+        self.pointPreviewDetailsLabel.setTextFormat(Qt.TextFormat.PlainText)
+        self.pointPreviewDetailsLabel.setMinimumWidth(0)
+        self.pointPreviewDetailsLabel.setFixedHeight(3 * self.pointPreviewDetailsLabel.fontMetrics().lineSpacing())
+        self.pointPreviewDetailsLabel.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                                 QtWidgets.QSizePolicy.Policy.Preferred)
+        self.verticalLayout_3.addWidget(self.pointPreviewDetailsLabel)
         self.label_6 = QtWidgets.QLabel(self.groupBox_7)
         self.frameIndexSpinBox = makeSpinBox("frameIndexSpinBox", self.groupBox_7)
         self.frameForm.addRow(self.label_6, self.frameIndexSpinBox)
         self.label = QtWidgets.QLabel(self.groupBox_7)
-        self.durationSpinBox = makeSpinBox("durationSpinBox", self.groupBox_7)
+        self.durationSpinBox = makeSpinBox("durationSpinBox", self.groupBox_7, 1)
         self.frameForm.addRow(self.label, self.durationSpinBox)
         self.verticalLayout_3.addLayout(self.frameForm)
         self.mirroredCheckbox = QtWidgets.QCheckBox(self.groupBox_7)
@@ -934,6 +1195,27 @@ class Ui_MainWindow:
         self.groupBox_3 = QtWidgets.QGroupBox(self.editorPanel)
         self.groupBox_3.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
         self.sequenceLayout = makeLayout(QtWidgets.QVBoxLayout, self.groupBox_3)
+        self.animationSourceRow = QtWidgets.QWidget(self.groupBox_3)
+        sourceLayout = makeLayout(QtWidgets.QHBoxLayout, self.animationSourceRow)
+        sourceLayout.setContentsMargins(0, 0, 0, 0)
+        sourceLayout.addWidget(QtWidgets.QLabel("Source", self.animationSourceRow))
+        self.animationSourceComboBox = QtWidgets.QComboBox(self.animationSourceRow)
+        self.animationSourceComboBox.addItem("Sprite animation", "independent")
+        self.animationSourceComboBox.addItem("Base frame mapping", "pose")
+        self.animationSourceComboBox.setMinimumContentsLength(20)
+        self.animationSourceComboBox.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.animationSourceComboBox.setAccessibleName("Animation source")
+        self.animationSourceComboBox.setToolTip(
+            "Sprite animation uses this sprite's own sequence and timing. "
+            "Base frame mapping uses the layer frame paired with each Base Sheet frame. "
+            "Switching preserves both setups and the attachment.")
+        sourceLayout.addWidget(self.animationSourceComboBox, 1)
+        self.sequenceLayout.addWidget(self.animationSourceRow)
+        policy = self.animationSourceRow.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.animationSourceRow.setSizePolicy(policy)
+        self.animationSourceRow.hide()
         self.sequenceBody = makeLayout(QtWidgets.QHBoxLayout)
         self.animationFrameList = TextWidthListWidget(self.groupBox_3, characters=10)
         self.animationFrameList.setSizePolicy(
@@ -962,13 +1244,19 @@ class Ui_MainWindow:
         for name in ("hitPointButton", "returnPointButton", "rushPointButton"):
             self.sequenceMarkers.addWidget(makeButton(name, self.groupBox_3))
         self.sequenceLayout.addLayout(self.sequenceMarkers)
+        # Layer tabs omit controls that do not apply, but keep their slots so
+        # switching subjects cannot change panel size or responsive breakpoints.
+        for widget in (self.pointPreviewDetailsLabel, self.spriteOffsetsGroupBox,
+                       self.shadowOffsetsGroupBox, self.shadowPreviewGroupBox,
+                       self.mirroredCheckbox, self.hitPointButton,
+                       self.returnPointButton, self.rushPointButton):
+            policy = widget.sizePolicy()
+            policy.setRetainSizeWhenHidden(True)
+            widget.setSizePolicy(policy)
         self.viewControlsLayout.addWidget(self.inspectorPanel, 0, 0)
         self.viewControlsLayout.addWidget(self.groupBox_3, 0, 1)
-        self.viewControlsLayout.addWidget(self.previewGroupBox, 1, 0, 1, 2)
         self.viewControlsLayout.setColumnStretch(1, 1)
         self.viewControlsLayout.setRowStretch(0, 1)
-        self.previewGroupBox.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
-                                          QtWidgets.QSizePolicy.Policy.Maximum)
         self.previewSplitter.addWidget(self.viewControlsPanel)
         self.previewSplitter.setStretchFactor(0, 1)
         self.previewSplitter.setStretchFactor(1, 0)
@@ -976,11 +1264,32 @@ class Ui_MainWindow:
         self.mainSplitter.addWidget(self.editorPanel)
         self.mainSplitter.setStretchFactor(0, 0)
         self.mainSplitter.setStretchFactor(1, 1)
-        self.mainSplitter.setSizes([220, 520])
+        self.mainSplitter.setSizes([180, 560])
         self.previewSplitter.setSizes([500, 350])
         self.sequenceStacked = False
         self.updatingEditorLayout = False
         self.editorPanel.resized.connect(self.updateEditorLayout)
+        # A preview toolbar can resize the splitter without resizing the editor.
+        # Reflow after Qt finishes assigning the available space.
+        self.editorLayoutTimer = QtCore.QTimer(self.editorPanel)
+        self.editorLayoutTimer.setSingleShot(True)
+        self.editorLayoutTimer.timeout.connect(self.updateEditorLayout)
+        self.previewSplitter.resized.connect(lambda: self.editorLayoutTimer.start(0))
+        self.collapsible_groups = {
+            "action_points": self.actionPointsGroupBox,
+            "sprite_preview": self.spritePreviewGroupBox,
+            "shadow_preview": self.shadowPreviewGroupBox,
+            "animation_speed": self.groupBox_6,
+            "onion": self.onionPreviewGroupBox,
+        }
+        self._library_expanded_height = None
+        self._library_resize_pending = False
+        self.collapseLayoutTimer = QtCore.QTimer(self.editorPanel)
+        self.collapseLayoutTimer.setSingleShot(True)
+        self.collapseLayoutTimer.timeout.connect(self.refresh_collapsed_layout)
+        for name, group in self.collapsible_groups.items():
+            group.collapsed_changed.connect(
+                lambda collapsed, key=name: self.control_group_collapsed(key, collapsed))
         MainWindow.setCentralWidget(self.centralwidget)
         self.menubar = QtWidgets.QMenuBar(MainWindow)
         self.menubar.setGeometry(QtCore.QRect(0, 0, 623, 21))
@@ -989,6 +1298,8 @@ class Ui_MainWindow:
         self.menuFile.setObjectName("menuFile")
         self.menuRecent = QtWidgets.QMenu(self.menuFile)
         self.menuRecent.setObjectName("menuRecent")
+        self.menuRecentPreviews = QtWidgets.QMenu(self.menuFile)
+        self.menuRecentPreviews.setObjectName("menuRecentPreviews")
         self.menuExport = QtWidgets.QMenu(self.menuFile)
         self.menuExport.setObjectName("menuExport")
         MainWindow.setMenuBar(self.menubar)
@@ -1024,6 +1335,7 @@ class Ui_MainWindow:
         self.menuExport.addAction(self.actionExportSingle_Animation)
         self.menuFile.addAction(self.actionLoad)
         self.menuFile.addAction(self.menuRecent.menuAction())
+        self.menuFile.addAction(self.menuRecentPreviews.menuAction())
         self.menuFile.addSeparator()
         self.menuFile.addAction(self.menuExport.menuAction())
         self.menuFile.addAction(self.actionAdd_Action_Copy)
@@ -1043,58 +1355,119 @@ class Ui_MainWindow:
                 obj.setObjectName(name)
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
 
+    def control_group_collapsed(self, name, collapsed):
+        if name in ("animation_speed", "onion", "sprite_preview", "shadow_preview"):
+            group = self.collapsible_groups[name]
+            policy = group.sizePolicy()
+            policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Policy.Fixed if collapsed
+                                       else QtWidgets.QSizePolicy.Policy.Preferred)
+            group.setSizePolicy(policy)
+            self.playbackOptionsLayout.setStretchFactor(group, 0 if collapsed else 1)
+        if name == "action_points":
+            self.horizontalLayout_10.setAlignment(
+                self.actionPointsGroupBox, Qt.AlignmentFlag.AlignTop if collapsed else Qt.AlignmentFlag(0))
+            if collapsed and not self._library_resize_pending and self.libraryPanel.isVisible():
+                self._library_expanded_height = self.mainSplitter.sizes()[0]
+            self._library_resize_pending = True
+        self.editorLayoutTimer.start(0)
+        self.collapseLayoutTimer.start(0)
+
+    def refresh_collapsed_layout(self):
+        # Hidden document tabs do not receive normal layout requests. Refresh
+        # their hints too, otherwise QTabWidget retains an expanded tab's minimum.
+        for widget in (self.actionPointsGroupBox, self.groupBox_5, self.libraryPanel,
+                       self.inspectorPanel, self.viewControlsPanel):
+            widget.layout().invalidate()
+            widget.layout().activate()
+            widget.updateGeometry()
+        self.updateEditorLayout()
+        self.previewSplitter.refresh()
+        self.mainSplitter.refresh()
+        widget = self.editorPanel
+        while widget is not None:
+            if widget.layout():
+                widget.layout().invalidate()
+                widget.layout().activate()
+            widget.updateGeometry()
+            widget = widget.parentWidget()
+        # Size the splitter only after its children and ancestors have their new
+        # minimums. A separate zero-delay timer could run against the old layout
+        # and keep the expanded height after a second collapse.
+        if self._library_resize_pending:
+            self._library_resize_pending = False
+            self.resize_collapsed_library()
+
+    def resize_collapsed_library(self):
+        sizes = self.mainSplitter.sizes()
+        height = self.libraryPanel.minimumSizeHint().height()
+        if not self.actionPointsGroupBox.is_collapsed():
+            height = max(height, self._library_expanded_height or height)
+        self.mainSplitter.setSizes([height, max(1, sum(sizes) - height)])
+
     def updateEditorLayout(self):
         """Use spare height for the sequence and spare width for the sprite canvas."""
         if self.updatingEditorLayout:
             return
         self.updatingEditorLayout = True
         try:
+            self.pointPreviewDetailsLabel.setFixedHeight(3 * self.pointPreviewDetailsLabel.fontMetrics().lineSpacing())
+            # Keep the reserved info area above the fields and the next grid row.
+            self.groupBox_7.setMinimumHeight(self.groupBox_7.sizeHint().height())
+            self.gridLayout_3.setRowMinimumHeight(1, max(self.directionGroupBox.minimumSizeHint().height(), self.groupBox_7.minimumHeight()))
+            self.inspectorPanel.setMinimumHeight(self.gridLayout_3.minimumSize().height())
+            self.viewControlsLayout.setRowMinimumHeight(0, self.inspectorPanel.minimumHeight())
             fontHeight = self.viewControlsPanel.fontMetrics().height()
             buttonHeight = max(button.minimumSizeHint().height() for button in self.sequenceButtonWidgets)
             margins = self.sequenceLayout.contentsMargins()
             frameMargins = self.groupBox_3.contentsMargins()
             sequenceFooterHeight = (self.sequenceClipboard.minimumSize().height()
                                     + self.sequenceMarkers.minimumSize().height()
+                                    + self.animationSourceRow.minimumSizeHint().height() + self.sequenceLayout.spacing()
                                     + margins.top() + margins.bottom()
                                     + frameMargins.top() + frameMargins.bottom()
                                     + 2 * self.sequenceLayout.spacing())
             sequenceHeight = 2 * buttonHeight + self.sequenceButtons.verticalSpacing() + sequenceFooterHeight
             self.stackedSequenceMinimumHeight = (self.inspectorPanel.minimumSizeHint().height()
-                                                + self.previewGroupBox.minimumSizeHint().height()
-                                                + sequenceHeight + 2 * self.viewControlsLayout.spacing())
-            threshold = self.stackedSequenceMinimumHeight + (0 if self.sequenceStacked else fontHeight // 4)
-            stacked = self.editorPanel.height() >= threshold
+                                                + sequenceHeight + self.viewControlsLayout.spacing())
+            threshold = self.stackedSequenceMinimumHeight + (
+                0 if self.sequenceStacked else fontHeight // 4)
+            stacked = self.previewSplitter.height() >= threshold
             normalSequenceWidth = max(
                 self.animationFrameList.minimumSizeHint().width()
                 + max(button.minimumSizeHint().width() for button in self.sequenceButtonWidgets)
                 + self.sequenceBody.spacing(), self.sequenceMarkers.minimumSize().width())
             normalSequenceWidth += margins.left() + margins.right() + frameMargins.left() + frameMargins.right()
-            controlWidth = max(self.previewGroupBox.minimumSizeHint().width(),
-                               self.inspectorPanel.minimumSizeHint().width()
-                               + (0 if stacked else normalSequenceWidth + self.viewControlsLayout.spacing()))
+            # Both titles belong to the same panel across Base/layer tabs.
+            titleWidth = (self.groupBox_3.fontMetrics().horizontalAdvance("Frames Mapped to Base")
+                          + 2 * self.groupBox_3.style().pixelMetric(QtWidgets.QStyle.PixelMetric.PM_IndicatorWidth))
+            self.groupBox_3.setMinimumWidth(titleWidth)
+            normalSequenceWidth = max(normalSequenceWidth, titleWidth,
+                self.animationSourceRow.minimumSizeHint().width() + margins.left() + margins.right()
+                + frameMargins.left() + frameMargins.right())
+            controlWidth = (self.inspectorPanel.minimumSizeHint().width()
+                            + (0 if stacked else normalSequenceWidth + self.viewControlsLayout.spacing()))
             normalSequenceHeight = (5 * buttonHeight + 4 * self.sequenceButtons.verticalSpacing()
                                     + sequenceFooterHeight)
-            controlHeight = (max(self.inspectorPanel.minimumSizeHint().height(), normalSequenceHeight)
-                             + self.previewGroupBox.minimumSizeHint().height() + self.viewControlsLayout.spacing())
-            # Keep the compact minimum even when stacked so Restore can shrink the window.
+            controlHeight = max(self.inspectorPanel.minimumSizeHint().height(), normalSequenceHeight)
+            # Either arrangement may be the shorter one once groups are folded.
+            # Do not reserve five rows of sequence buttons for the two-row layout.
+            controlHeight = min(controlHeight, self.stackedSequenceMinimumHeight)
             self.viewControlsPanel.setMinimumSize(controlWidth, controlHeight)
             self.viewControlsPanel.setMaximumWidth(controlWidth + 2 * fontHeight)
             if stacked == self.sequenceStacked:
                 return
             self.sequenceStacked = stacked
-            for widget in (self.inspectorPanel, self.groupBox_3, self.previewGroupBox):
+            for widget in (self.inspectorPanel, self.groupBox_3):
                 self.viewControlsLayout.removeWidget(widget)
             for row in range(3):
                 self.viewControlsLayout.setRowStretch(row, 0)
             if stacked:
                 self.viewControlsLayout.addWidget(self.inspectorPanel, 0, 0, 1, 2)
                 self.viewControlsLayout.addWidget(self.groupBox_3, 1, 0, 1, 2)
-                self.viewControlsLayout.addWidget(self.previewGroupBox, 2, 0, 1, 2)
                 self.viewControlsLayout.setRowStretch(1, 1)
             else:
                 self.viewControlsLayout.addWidget(self.inspectorPanel, 0, 0)
                 self.viewControlsLayout.addWidget(self.groupBox_3, 0, 1)
-                self.viewControlsLayout.addWidget(self.previewGroupBox, 1, 0, 1, 2)
                 self.viewControlsLayout.setRowStretch(0, 1)
             for row in range(6):
                 self.sequenceButtons.setRowStretch(row, 0)
@@ -1122,7 +1495,6 @@ class Ui_MainWindow:
         self.groupBox_5.setTitle(_translate("MainWindow", "Sprite Sheet"))
         self.sheetFramesGroupBox.setTitle(_translate("MainWindow", "Frames"))
         self.inspectorPanel.setTitle(_translate("MainWindow", "Animation Frame"))
-        self.previewGroupBox.setTitle(_translate("MainWindow", "Preview"))
         self.groupBox_6.setTitle(_translate("MainWindow", "Animation Speed"))
         self.directionGroupBox.setTitle(_translate("MainWindow", "Direction"))
         for button, name in (
@@ -1141,14 +1513,15 @@ class Ui_MainWindow:
         self.label_4.setText(_translate("MainWindow", "Y:"))
         self.groupBox_8.setTitle(_translate("MainWindow", "Shadow Offset"))
         self.actionPointsGroupBox.setTitle(_translate("MainWindow", "Action Points"))
-        self.sheetFrameScopeLabel.setText(_translate("MainWindow", "Current Frame: -"))
+        self.sheetFrameScopeLabel.setText(_translate("MainWindow", "Sheet frame: -"))
         self.shadowOffsetScopeLabel.setText(_translate("MainWindow", "Frame 0 of 0"))
         self.showActionPointsCheckBox.setText(_translate("MainWindow", "Show"))
         self.label_2.setText(_translate("MainWindow", "X:"))
         self.label_5.setText(_translate("MainWindow", "Y:"))
         self.groupBox_3.setTitle(_translate("MainWindow", "Animation Sequence"))
         self.menuFile.setTitle(_translate("MainWindow", "File"))
-        self.menuRecent.setTitle(_translate("MainWindow", "Recent"))
+        self.menuRecent.setTitle(_translate("MainWindow", "Recent Sprites"))
+        self.menuRecentPreviews.setTitle(_translate("MainWindow", "Recent Previews"))
         self.menuExport.setTitle(_translate("MainWindow", "Export"))
         self.actionLoad.setText(_translate("MainWindow", "Open"))
         self.actionLoad.setShortcut(_translate("MainWindow", "Ctrl+O"))

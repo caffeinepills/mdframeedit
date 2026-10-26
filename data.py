@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from dataclasses import field, dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
-VERSION = "2.0"
+VERSION = "2.1"
+
+
+class FormatError(ValueError):
+    """Invalid sprite, profile or interchange data."""
 
 RIGHT = 6
 UP_RIGHT = 5
@@ -29,6 +34,7 @@ FD_STR = {
 
 
 class SheetFormat(Enum):
+    NATIVE = "Sprite.json"
     SINGLE = "FrameData.xml"
     MULTI = "AnimData.xml"
 
@@ -39,6 +45,8 @@ class Offset:
     y: int = 0  # YOffset
 
     def __eq__(self, other):
+        if not isinstance(other, Offset):
+            return NotImplemented
         return self.x == other.x and self.y == other.y
 
     def __add__(self, other):
@@ -248,11 +256,42 @@ def center_bounds(rect: Rectangle):
 
 @dataclass(slots=True)
 class ActionPoints:
-    left_hand: Offset = field(default_factory=Offset) # red[1]
-    center: Offset = field(default_factory=Offset)  # green[2]
-    right_hand: Offset  = field(default_factory=Offset) # blue[3]
-    head: Offset  = field(default_factory=Offset) # black
+    left_hand: Offset | None = field(default_factory=Offset) # red[1]
+    center: Offset | None = field(default_factory=Offset)  # green[2]
+    right_hand: Offset | None = field(default_factory=Offset) # blue[3]
+    head: Offset | None = field(default_factory=Offset) # black
     shadow: Offset = field(default_factory=Offset)  # white[4]
+    extra: dict[str, Offset] = field(default_factory=dict)
+
+    @classmethod
+    def from_named(cls, points):
+        """Missing names are unset, unlike legacy four-point construction."""
+        result = cls(None, None, None, None)
+        for name, point in points.items():
+            result.set(name, point)
+        return result
+
+    def items(self):
+        return tuple((name, value) for name, value in (
+            ("left_hand", self.left_hand), ("center", self.center),
+            ("right_hand", self.right_hand), ("head", self.head), *self.extra.items(),
+        ) if value is not None)
+
+    def get(self, name):
+        return getattr(self, name) if name in ("left_hand", "center", "right_hand", "head") else self.extra.get(name)
+
+    def set(self, name, point):
+        from project import validate_point_name
+        validate_point_name(name)
+        if name in ("left_hand", "center", "right_hand", "head"):
+            setattr(self, name, point)
+        elif point is None:
+            self.extra.pop(name, None)
+        else:
+            self.extra[name] = point
+
+    def signature(self):
+        return tuple(sorted((name, point.data()) for name, point in self.items()))
 
     @property
     def center_flip(self):
@@ -271,11 +310,7 @@ class ActionPoints:
         return self._flip(self.right_hand)
 
     def empty(self):
-        if (self.left_hand.x == 0 and self.left_hand.y == 0 and self.right_hand.x == 0 and self.right_hand.y == 0 and
-                self.head.x == 0 and self.head.y == 0 and self.center.x == 0 and self.center.y == 0):
-            return True
-
-        return False
+        return all(point.x == 0 and point.y == 0 for _, point in self.items())
 
     def all_pos(self):
         return self.left_hand, self.center, self.right_hand, self.head
@@ -284,53 +319,20 @@ class ActionPoints:
         return self.left_hand_flip, self.center_flip, self.right_hand_flip, self.head_flip
 
     def add(self, offset: Offset):
-        self.left_hand += offset
-        self.center += offset
-        self.right_hand += offset
-        self.head += offset
+        for name, point in self.items():
+            self.set(name, point + offset)
 
     def flip(self, offset: Offset, width: int):
         return Offset(width-offset.x - 1, offset.y)
 
     def _flip(self, offset: Offset):
-        return Offset(-offset.x - 1, offset.y)
+        return Offset(-offset.x - 1, offset.y) if offset is not None else None
 
     def equals(self, other: 'ActionPoints', flip: bool, odd_width: bool):
-        # print("equals", self)
-        # print("other", other)
-        center = other.center
-        head = other.head
-        left_hand = other.left_hand
-        right_hand = other.right_hand
-
-        if flip:
-            #print("--- flip", width)
-            # center = self.flip(other.center, width) + Offset(1 if odd_width else 0, 0)
-            # head = self.flip(other.head, width) + Offset(1 if odd_width else 0, 0)
-            # left_hand = self.flip(other.left_hand, width) + Offset(1 if odd_width else 0, 0)
-            # right_hand = self.flip(other.right_hand, width) + Offset(1 if odd_width else 0, 0)
-
-            center = other.center_flip + Offset(1 if odd_width else 0, 0)
-            head = other.head_flip + Offset(1 if odd_width else 0, 0)
-            left_hand = other.left_hand_flip + Offset(1 if odd_width else 0, 0)
-            right_hand = other.right_hand_flip + Offset(1 if odd_width else 0, 0)
-            #
-            #
-            # print(left_hand, self.left_hand)
-            # print(center, self.center)
-            # print(right_hand, self.right_hand)
-            # print(head, self.head)
-
-        if self.center != center:
-            return False
-        if self.head != head:
-            return False
-        if self.left_hand != left_hand:
-            return False
-        if self.right_hand != right_hand:
-            return False
-
-        return True
+        ours = dict(self.items())
+        theirs = {name: (self._flip(point) + Offset(1 if odd_width else 0, 0) if flip else point)
+                  for name, point in other.items()}
+        return ours == theirs
 
     # Top left
     # def get_rect(self):
@@ -341,10 +343,11 @@ class ActionPoints:
     #     return Rectangle(left, top, right - left, bottom - top)
 
     def get_rect(self):
-        left = min(min(self.center.x, self.head.x), min(self.left_hand.x, self.right_hand.x))
-        top = min(min(self.center.y, self.head.y), min(self.left_hand.y, self.right_hand.y))
-        right = max(max(self.center.x, self.head.x), max(self.left_hand.x, self.right_hand.x)) + 1
-        bottom = max(max(self.center.y, self.head.y), max(self.left_hand.y, self.right_hand.y)) + 1
+        points = [point for _, point in self.items()]
+        if not points:
+            return Rectangle(0, 0, 0, 0)
+        left, top = min(p.x for p in points), min(p.y for p in points)
+        right, bottom = max(p.x for p in points) + 1, max(p.y for p in points) + 1
 
         return Rectangle(left, bottom, right-left, top-bottom)
 
@@ -362,6 +365,10 @@ class EditState:
     sheet_frame: int | None
     signature: tuple[object, ...]
     frame_selection: tuple[int, ...] = ()
+    action_point_names: tuple[str, ...] = ()
+    rig_profile: object = None
+    sheet_frame_selection: tuple[int, ...] = ()
+    rig_profile_id: str | None = None
 
 
 @dataclass(slots=True)

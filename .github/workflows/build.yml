@@ -63,6 +63,21 @@ jobs:
       - name: Test action aliases
         run: python tests/runner/test_action_alias.py
 
+      - name: Test native JSON format
+        run: python tests/runner/test_native_format.py
+
+      - name: Test image atlas import
+        run: python tests/runner/test_image_atlas.py
+
+      - name: Test lossless PNG saving
+        run: python tests/runner/test_png_saving.py
+
+      - name: Test format adapters
+        run: python tests/runner/test_format_adapters.py
+
+      - name: Test project builds
+        run: python tests/runner/test_project_build.py
+
       - name: Smoke test editor and CLI
         if: runner.os != 'Linux'
         # This file has no dependency on the rest of the local test suite.

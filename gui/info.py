@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PIL import Image
+from gui import ScreenFitDialog
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from data import ArtworkInfo, SheetFormat
@@ -85,7 +87,7 @@ class PaletteModel(QtCore.QAbstractTableModel):
         self.layoutChanged.emit()
 
 
-class SpriteInfoDialog(QtWidgets.QDialog):
+class SpriteInfoDialog(ScreenFitDialog):
     """Read-only palette, opacity, and export information for the active sprite."""
 
     def __init__(self, editor: AnimationEditor) -> None:
@@ -156,7 +158,7 @@ class SpriteInfoDialog(QtWidgets.QDialog):
         return (
             (
                 "Mode:",
-                "Single sheet"
+                "Native JSON" if editor.sheet_format == SheetFormat.NATIVE else "Single sheet"
                 if editor.sheet_format == SheetFormat.SINGLE
                 else "Multi-sheet",
             ),

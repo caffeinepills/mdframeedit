@@ -8,11 +8,13 @@ if __name__ == "__main__" and len(sys.argv) > 1:
     sys.exit(cli_main())
 
 import copy
+import time
 import os
 import pathlib
+import signal
 import traceback
 import xml.etree.ElementTree as ElementTree
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial, wraps
 from hashlib import sha256
 from typing import TYPE_CHECKING, TypeVar
@@ -26,18 +28,11 @@ import warnings
 warnings.simplefilter("ignore", UserWarning)
 sys.coinit_flags = 2
 
-from pyglet.gl import (
-    GL_COLOR_BUFFER_BIT,
-    GL_DEPTH_BUFFER_BIT,
-    GL_NEAREST,
-    glClear,
-    glClearColor,
-)
+from pyglet.gl import GL_NEAREST
 from pyglet.math import clamp
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QFileInfo, QSettings
-from PySide6.QtGui import QImage, QKeyEvent, QSurfaceFormat, QWheelEvent
-from PySide6.QtOpenGLWidgets import QOpenGLWidget
+from PySide6.QtGui import QImage, QSurfaceFormat
 from PySide6.QtWidgets import QFileDialog, QInputDialog, QListWidgetItem
 
 from conversion import AnimationSerialization, SpriteDocument
@@ -52,17 +47,18 @@ from data import (
     Offset,
     SheetFormat, EditState,
 )
-from formats import detect_format, validate_export
-from gui.batchadd import ActionAliasDialog
-from gui.batchedit import BatchEditDialog
+from formats import SpriteFormat, validate_export
+from formats.native import read_texture_layout
+from preview import is_preview_path
+from formats.packing import TextureLayout, unpack_texture
+from gui.batch import ActionAliasDialog, BatchEditDialog
 from gui.editor import Ui_MainWindow
 from gui.info import SpriteInfoDialog
-from gui.celledit import ResizeFramesDialog
-from gui.textures import TopLeftGrid
+from gui.preview import TopLeftGrid, PygletWidget, create_point_marker
+from gui.layer_workspace import LayerWorkspace
+from gui.image_edit import IMAGE_FILTER, IMAGE_SUFFIXES, ImageAtlasDialog, ResizeFramesDialog
 from utils import (
-    Camera,
     FormatError,
-    create_plus_image,
     shadow_image,
     template_image,
 )
@@ -76,6 +72,12 @@ if TYPE_CHECKING:
 
 pyglet.image.Texture.default_min_filter = GL_NEAREST
 pyglet.image.Texture.default_mag_filter = GL_NEAREST
+
+
+@dataclass(frozen=True)
+class CopiedActionPoint:
+    name: str
+    position: tuple[int, int] | None
 
 
 class SpriteEditCommand(QtGui.QUndoCommand):
@@ -127,8 +129,12 @@ def undoable(text: str) -> Callable[
     def decorate(method: Callable[..., EditResult]) -> Callable[..., EditResult]:
         @wraps(method)
         def record(editor: AnimationEditor, *args: object, **kwargs: object) -> EditResult:
-            if editor.loaded_tree is None or editor.editDepth or editor.restoringEdit:
+            if editor.frozen_preview:
+                return None
+            if editor.sheet_format is None or editor.editDepth or editor.restoringEdit:
                 return method(editor, *args, **kwargs)
+            if getattr(editor, "point_preview", None) is not None:
+                editor.point_preview.pause_for_edit(editor)
             before = editor.captureEditState()
             editor.editDepth += 1
             try:
@@ -256,476 +262,8 @@ class AnimFrameItem(QListWidgetItem):
             self.editor.set_animation()
 
 
-class QtPygletContext(pyglet.gl.base.Context):
-    """Track pyglet objects in the native context owned by Qt."""
-
-    def __init__(self, qt_context: QtGui.QOpenGLContext) -> None:
-        super().__init__(None)
-        self.canvas = qt_context
-
-    def _safe_to_operate_on(self) -> bool:
-        return (
-            self.canvas is not None
-            and QtGui.QOpenGLContext.currentContext() is self.canvas
-            and super()._safe_to_operate_on()
-        )
-
-    def _safe_to_operate_on_object_space(self) -> bool:
-        return self._safe_to_operate_on()
 
 
-class PygletWidget(QOpenGLWidget):
-    _default_vertex_source = """#version 150 core
-        in vec4 position;
-
-        uniform WindowBlock
-        {
-            mat4 projection;
-            mat4 view;
-        } window;
-
-        void main()
-        {
-            gl_Position = window.projection * window.view * position;
-        }
-    """
-    _default_fragment_source = """#version 330 core
-        out vec4 color;
-
-        void main()
-        {
-            color = vec4(1.0, 0.0, 0.0, 1.0);
-        }
-    """
-
-    def __init__(
-        self,
-        width: int,
-        height: int,
-        parent: QtWidgets.QWidget | None,
-        mainWindow: QtWidgets.QMainWindow,
-        editor: AnimationEditor,
-    ) -> None:
-        super().__init__(parent)
-        self.mainWindow = mainWindow
-        self.setMinimumSize(width, height)
-        self.editor = editor
-
-        self._pyglet_context: QtPygletContext | None = None
-        self._restore_preview = False
-        self.lines: list[pyglet.shapes.Line] = []
-        self.timer = QtCore.QTimer(self)
-        self.timer.timeout.connect(self._pyglet_update)
-        self.timer.setInterval(0)
-        self.timer.start()
-
-        self.focus_point = self.width() // 2, self.height() // 3
-
-        self.camera = Camera(self, self.focus_point)
-        self.cameraLocked = True
-        self.panOffset = QtCore.QPointF()
-        self.dragPosition: QtCore.QPointF | None = None
-        self.showSpriteBounds = editor.settings.value(
-            "preferences/showSpriteBounds", False, bool
-        )
-        self.spriteBounds: pyglet.shapes.Box | None = None
-        self.setCameraLocked(
-            editor.settings.value("preferences/cameraLocked", True, bool)
-        )
-
-        self.elapsed = 0
-
-        self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        super().keyPressEvent(event)
-        self.makeCurrent()
-
-        if event.key() == QtCore.Qt.Key.Key_O:
-            self.editor.ui.showActionPointsCheckBox.toggle()
-        elif event.key() == QtCore.Qt.Key.Key_S:
-            if self.editor.shadow:
-                self.editor.shadow.visible = not self.editor.shadow.visible
-
-    def setCameraLocked(self, locked: bool) -> None:
-        locked = bool(locked)
-        if locked != self.cameraLocked:
-            self._update_camera_focus()
-            self.panOffset = (
-                QtCore.QPointF()
-                if locked
-                else QtCore.QPointF(
-                    self.camera.x - self.width() // 2,
-                    self.camera.y - self.height() // 3,
-                )
-            )
-            self.cameraLocked = locked
-            self.dragPosition = None
-            self._update_camera_focus()
-        self.setCursor(
-            QtCore.Qt.CursorShape.ArrowCursor
-            if locked
-            else QtCore.Qt.CursorShape.OpenHandCursor
-        )
-        self.update()
-
-    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
-        if not self.cameraLocked and event.button() == QtCore.Qt.MouseButton.LeftButton:
-            self.dragPosition = event.position()
-            self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
-        if (
-            not self.cameraLocked
-            and self.dragPosition is not None
-            and event.buttons() & QtCore.Qt.MouseButton.LeftButton
-        ):
-            delta = event.position() - self.dragPosition
-            self.panOffset += QtCore.QPointF(
-                -delta.x() / self.camera.zoom, delta.y() / self.camera.zoom
-            )
-            self.dragPosition = event.position()
-            self._update_camera_focus()
-            self.update()
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
-        if (
-            event.button() == QtCore.Qt.MouseButton.LeftButton
-            and self.dragPosition is not None
-        ):
-            self.dragPosition = None
-            self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-    def wheelEvent(self, event: QWheelEvent) -> None:
-        super().wheelEvent(event)
-        self.makeCurrent()
-
-        if event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier:
-            if self.editor.sprite:
-                if event.angleDelta().y() > 0:
-                    self.editor.ui.spriteOpacitySlider.setValue(
-                        max(self.editor.ui.spriteOpacitySlider.value() - 50, 0)
-                    )
-                else:
-                    self.editor.ui.spriteOpacitySlider.setValue(
-                        min(self.editor.ui.spriteOpacitySlider.value() + 50, 255)
-                    )
-        else:
-            if event.angleDelta().y() > 0:
-                self.camera.zoom *= 2.0
-            else:
-                self.camera.zoom /= 2.0
-
-        self.view = pyglet.math.Mat4()
-        event.accept()
-
-    def _pyglet_update(self) -> None:
-        # Tick the pyglet clock, so scheduled events can work.
-        pyglet.clock.tick()
-
-        # Force widget to update, otherwise paintGL will not be called.
-        self.update()
-
-    def paintGL(self) -> None:
-        if self._pyglet_context is None:
-            return
-        self._activate_context()
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-
-        self._update_camera_focus()
-        self._update_guide_lines()
-        self._update_sprite_bounds()
-        with self.camera:
-            self.batch.draw()
-
-    def _update_camera_focus(self) -> None:
-        if not self.cameraLocked:
-            self.camera.x = self.width() // 2 + self.panOffset.x()
-            self.camera.y = self.height() // 3 + self.panOffset.y()
-        elif self.camera.zoom > 1 and self.editor.sprite is not None:
-            self.camera.x, self.camera.y = self.editor.sprite.position[:2]
-        else:
-            self.camera.x = self.width() // 2
-            self.camera.y = self.height() // 3
-
-    def _update_guide_lines(self) -> None:
-        if not self.lines:
-            return
-        zoom = self.camera.zoom
-        # Convert viewport edges back to world coordinates
-        # This way origin spans the view at every zoom level.
-        left = self.camera.x - (self.width() // 2) / zoom
-        bottom = self.camera.y - (self.height() // 3) / zoom
-        horizontal, vertical = self.lines
-        horizontal.position = (left - 1 / zoom, self.height() // 3)
-        horizontal.x2 = left + (self.width() + 1) / zoom
-        horizontal.y2 = self.height() // 3
-        vertical.position = (self.width() // 2, bottom - 1 / zoom)
-        vertical.x2 = self.width() // 2
-        vertical.y2 = bottom + (self.height() + 1) / zoom
-        horizontal.width = vertical.width = 1 / zoom
-
-    def _update_sprite_bounds(self) -> None:
-        sprite = self.editor.sprite
-        if sprite is None or not self.showSpriteBounds:
-            if self.spriteBounds is not None:
-                self.spriteBounds.visible = False
-            return
-        if self.spriteBounds is None:
-            self.spriteBounds = pyglet.shapes.Box(
-                0,
-                0,
-                sprite.width,
-                sprite.height,
-                color=(255, 220, 0),
-                batch=self.batch,
-                group=pyglet.graphics.Group(4),
-            )
-        zoom = self.camera.zoom
-        viewport = (pyglet.gl.GLint * 4)()
-        pyglet.gl.glGetIntegerv(pyglet.gl.GL_VIEWPORT, viewport)
-        scale_x = viewport[2] / max(1, self.width())
-        scale_y = viewport[3] / max(1, self.height())
-        zoom_x, zoom_y = zoom * scale_x, zoom * scale_y
-        left = sprite.x - sprite.image.anchor_x * sprite.scale * sprite.scale_x
-        bottom = sprite.y - sprite.image.anchor_y * sprite.scale * sprite.scale_y
-        origin_x = viewport[0] + (self.width() // 2) * scale_x
-        origin_y = viewport[1] + (self.height() // 3) * scale_y
-        # Snap all four outer edges in screen space. Inverse zoom alone keeps
-        # the nominal thickness constant but leaves edges between pixel boundaries.
-        screen_left = round((left - self.camera.x) * zoom_x + origin_x)
-        screen_bottom = round((bottom - self.camera.y) * zoom_y + origin_y)
-        screen_right = max(screen_left + 1, round((left + sprite.width - self.camera.x) * zoom_x + origin_x))
-        screen_top = max(screen_bottom + 1, round((bottom + sprite.height - self.camera.y) * zoom_y + origin_y))
-        self.spriteBounds.position = (
-            (screen_left - origin_x) / zoom_x + self.camera.x,
-            (screen_bottom - origin_y) / zoom_y + self.camera.y,
-        )
-        self.spriteBounds.width = (screen_right - screen_left) / zoom_x
-        self.spriteBounds.height = (screen_top - screen_bottom) / zoom_y
-        self.spriteBounds.thickness = 1 / max(zoom_x, zoom_y)
-        self.spriteBounds.visible = True
-
-    def resizeGL(self, width: int, height: int) -> None:
-        self._activate_context()
-        self.projection = pyglet.math.Mat4.orthogonal_projection(
-            0, width, 0, height, -255, 255
-        )
-
-        self.viewport = 0, 0, width, height
-
-        self.focus_point = width // 2, height // 3
-
-        for line in self.lines:
-            line.delete()
-        self.lines = [
-            pyglet.shapes.Line(
-                0,
-                self.height() // 3,
-                self.width(),
-                self.height() // 3,
-                batch=self.batch,
-            ),
-            pyglet.shapes.Line(
-                self.width() // 2, 0, self.width() // 2, self.height(), batch=self.batch
-            ),
-        ]
-
-        if self.editor.sprite:
-            frame = self.editor.displayed_anim_frame or self.editor.current_anim_frame
-            self.editor.sprite.position = self.editor.get_sprite_position(frame)
-            self.editor.shadow.position = self.editor.get_shadow_position(frame)
-            self.editor.updateActionPointPreview(frame)
-            self.editor.updateOnionPreview(frame)
-        elif self._restore_preview:
-            self._restore_preview = False
-            self.editor.set_animation()
-        self._update_camera_focus()
-
-    def initializeGL(self) -> None:
-        """Call anything that needs a context to be created."""
-        self._pyglet_context = QtPygletContext(self.context())
-        self._activate_context()
-        self.context().aboutToBeDestroyed.connect(self.cleanup_gl_resources)
-        self._projection_matrix = pyglet.math.Mat4()
-        self._view_matrix = pyglet.math.Mat4()
-
-        self.batch = pyglet.graphics.Batch()
-
-        try:
-            self._default_program = pyglet.graphics.shader.ShaderProgram(
-                pyglet.graphics.shader.Shader(self._default_vertex_source, "vertex"),
-                pyglet.graphics.shader.Shader(
-                    self._default_fragment_source, "fragment"
-                ),
-            )
-        except pyglet.graphics.shader.ShaderException:
-            self.error_dialog = QtWidgets.QMessageBox()
-            self.error_dialog.setWindowTitle("Error")
-            self.error_dialog.setIcon(QtWidgets.QMessageBox.Icon.Critical)
-            self.error_dialog.setText(
-                f"Could not compile shader. Requires OpenGL 3.3 capability."
-            )
-            self.error_dialog.exec()
-            sys.exit(app.exec())
-
-        self.ubo = self._default_program.uniform_blocks["WindowBlock"].create_ubo()
-
-        glClearColor(0.5, 0.5, 0.5, 1.0)
-
-        self.view = pyglet.math.Mat4()
-        self.projection = pyglet.math.Mat4.orthogonal_projection(
-            0, self.width(), 0, self.height(), -255, 255
-        )
-        self.viewport = 0, 0, self.width(), self.height()
-
-    def _activate_context(self) -> None:
-        if self._pyglet_context is not None:
-            self._pyglet_context.set_current()
-
-    def makeCurrent(self) -> None:
-        super().makeCurrent()
-        self._activate_context()
-
-    def doneCurrent(self) -> None:
-        if pyglet.gl.current_context is self._pyglet_context:
-            pyglet.gl.current_context = None
-            pyglet.gl.gl_info.remove_active_context()
-        super().doneCurrent()
-
-    def cleanup_gl_resources(self) -> None:
-        """Release GPU objects before Qt destroys their native context.
-
-        VertexList.delete only frees slots in a batch. Its domains still own
-        buffers and VAOs, so those must also be released explicitly.
-        """
-        context = self._pyglet_context
-        if context is None:
-            return
-        self.makeCurrent()
-        editor = self.editor
-        self._restore_preview = editor.sprite is not None
-        textures: dict[int, pyglet.image.Texture] = {}
-
-        def remember_texture(texture: pyglet.image.AbstractImage | None) -> None:
-            while isinstance(texture, pyglet.image.TextureRegion):
-                texture = texture.owner
-            if isinstance(texture, pyglet.image.Texture):
-                textures[id(texture)] = texture
-
-        images = [
-            editor.sheet_image,
-            editor.action_pt_image,
-            editor.shadow_image,
-            editor.action_point_marker,
-            *editor._shadow_display_images.values(),
-        ]
-        for grid in (editor.image_grid, editor.action_grid):
-            if grid is not None:
-                images.extend(grid._items or [])
-                remember_texture(grid._texture_grid)
-                grid._texture_grid = None
-        for image in images:
-            if image is not None:
-                remember_texture(image)
-                for name in ("_current_texture", "_current_mipmap_texture"):
-                    remember_texture(getattr(image, name, None))
-                    if hasattr(image, name):
-                        setattr(image, name, None)
-        for sprite in (editor.sprite, editor.shadow, *editor.ap_sprites, *editor.onionSprites):
-            if sprite is not None:
-                remember_texture(sprite.image)
-                sprite.delete()
-        editor.sprite = editor.shadow = None
-        editor.left_hand = editor.center = editor.right_hand = editor.head = None
-        editor.shadow_point = None
-        editor.ap_sprites.clear()
-        editor.onionSprites.clear()
-        for line in self.lines:
-            line.delete()
-        self.lines.clear()
-        if self.spriteBounds is not None:
-            self.spriteBounds.delete()
-            self.spriteBounds = None
-        for domains in self.batch.group_map.values():
-            for domain in domains.values():
-                domain.vao.delete()
-                buffers = {id(buffer): buffer for buffer, _ in domain.buffer_attributes}
-                if hasattr(domain, "index_buffer"):
-                    buffers[id(domain.index_buffer)] = domain.index_buffer
-                for buffer in buffers.values():
-                    buffer.delete()
-        self.batch.group_map.clear()
-        self.batch.group_children.clear()
-        self.batch.top_groups.clear()
-        self.batch._draw_list.clear()
-        self.batch = None
-        self.ubo.buffer.delete()
-        self.ubo = None
-        programs = {
-            id(program): program for program in context._cached_programs.values()
-        }
-        for value in vars(context.object_space).values():
-            if isinstance(value, pyglet.graphics.shader.ShaderProgram):
-                programs[id(value)] = value
-        programs[id(self._default_program)] = self._default_program
-        for program in programs.values():
-            if program.id is not None:
-                program.delete()
-        self._default_program = None
-        context._cached_programs.clear()
-        for texture in textures.values():
-            if texture.id is not None:
-                texture.delete()
-        # Flush objects that pyglet queued while another tab was current.
-        context.set_current()
-        self.context().aboutToBeDestroyed.disconnect(self.cleanup_gl_resources)
-        self.doneCurrent()
-        context.canvas = None
-        self._pyglet_context = None
-
-    @property
-    def viewport(self) -> tuple[int, int, int, int]:
-        return self._viewport
-
-    @viewport.setter
-    def viewport(self, values: tuple[int, int, int, int]) -> None:
-        self._viewport = values
-        pr = 1.0
-        x, y, w, h = values
-        pyglet.gl.glViewport(int(x * pr), int(y * pr), int(w * pr), int(h * pr))
-
-    @property
-    def projection(self) -> pyglet.math.Mat4:
-        return self._projection_matrix
-
-    @projection.setter
-    def projection(self, matrix: pyglet.math.Mat4) -> None:
-        with self.ubo as window_block:
-            window_block.projection[:] = matrix
-
-        self._projection_matrix = matrix
-
-    @property
-    def view(self) -> pyglet.math.Mat4:
-        return self._view_matrix
-
-    @view.setter
-    def view(self, matrix: pyglet.math.Mat4) -> None:
-
-        with self.ubo as window_block:
-            window_block.view[:] = matrix
-
-        self._view_matrix = matrix
 
 
 REDUCE_RUSH_FRAMES = False
@@ -736,7 +274,7 @@ class AnimationEditor(AnimationSerialization):
     shadow_image: pyglet.image.AbstractImage | None
     sprite: pyglet.sprite.Sprite | None
     ANIMATION_SPEED_SLIDER_VALUES = (0.1, 0.25, 0.5, 1, 2)
-    MAX_RECENT = 5
+    MAX_RECENT = 10
 
     def __init__(
         self,
@@ -744,15 +282,22 @@ class AnimationEditor(AnimationSerialization):
         window: QtWidgets.QMainWindow,
         ui: Ui_MainWindow,
         document_host: SpriteEditorWindow | None = None,
+        preview_factory: Callable | None = None,
     ) -> None:
         self._configure_open_gl()
         self.app = app
         self.window = window
         self.ui = ui
         self.document_host = document_host
+        self.workspace = None
+        self.point_preview = None
         self.groups: list[AnimGroup] = []
         self.file_name = ""
-        self.sheet_format: SheetFormat | None = None
+        self.source_image_path: pathlib.Path | None = None
+        self.texture_name = "Anim.png"
+        self.frozen_preview = False
+        self.frozen_export_paths = {}
+        self.sheet_format: SheetFormat | str | None = None
         self.shadow_size_present = True
         self.loaded_shadow_size = 0
         self.loaded_tree: ElementTree.ElementTree | None = None
@@ -778,13 +323,21 @@ class AnimationEditor(AnimationSerialization):
         self.animationSettingsClipboard: AnimGroup | None = None
         self.editMenu.aboutToShow.connect(self.updateAnimationSettingsActions)
         self.editMenu.addSeparator()
-        self.actionPointsClipboard: ActionPoints | None = None
-        self.copyActionPointsAction = self.editMenu.addAction(
-            "Copy Action Points", self.copyActionPoints
+        self.actionPointsClipboard: ActionPoints | CopiedActionPoint | None = None
+        self.copyActionPointAction = self.editMenu.addAction(
+            "Copy Selected Action Point", self.copyActionPoint
         )
+        self.copyActionPointAction.setEnabled(False)
+        self.copyActionPointAction.setToolTip("Copy the selected named point from the current sheet frame, including its unset state.")
+        ui.loadedSheetFrameList.addAction(self.copyActionPointAction)
+        self.copyActionPointsAction = self.editMenu.addAction(
+            "Copy All Action Points", self.copyActionPoints
+        )
+        self.copyActionPointsAction.setToolTip("Copy every named point from the current sheet frame. Pasting replaces the target frames' point sets.")
         self.pasteActionPointsAction = self.editMenu.addAction(
             "Paste Action Points", self.pasteActionPoints
         )
+        ui.loadedSheetFrameList.setToolTip("Ctrl+click to select individual frames; Shift+click to select a range. Right-click to copy one point or all points. Ctrl+C copies all points; Ctrl+V pastes onto the selected frames.")
         for action, shortcut in (
             (self.copyActionPointsAction, QtGui.QKeySequence.StandardKey.Copy),
             (self.pasteActionPointsAction, QtGui.QKeySequence.StandardKey.Paste),
@@ -796,12 +349,16 @@ class AnimationEditor(AnimationSerialization):
         ui.loadedSheetFrameList.setContextMenuPolicy(
             QtCore.Qt.ContextMenuPolicy.ActionsContextMenu
         )
+        ui.loadedSheetFrameList.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        ui.loadedSheetFrameList.itemSelectionChanged.connect(self.updateActionPointActions)
         self.editMenu.aboutToShow.connect(self.updateActionPointActions)
         self.editMenu.addSeparator()
         self.resizeFramesAction = self.editMenu.addAction(
             "Edit Frame Cells...", self.openResizeFrames
         )
         self.resizeFramesAction.setEnabled(False)
+        self.layersAction = self.editMenu.addAction("Preview Sprites…", self.openLayers)
+        self.editMenu.aboutToShow.connect(lambda: self.layersAction.setEnabled(self.sheet_image is not None))
         self.editMenu.aboutToShow.connect(
             lambda: self.resizeFramesAction.setEnabled(self.sheet_image is not None)
         )
@@ -820,10 +377,11 @@ class AnimationEditor(AnimationSerialization):
             window.menuBar().addMenu(self.editMenu)
 
         self.settings = QSettings("MDFrameEditor", "Frame Editor")
-        self.recent_files: list[str] = self.settings.value("recent", [], list)
+        self._read_recent_files()
         self.artworkPath: pathlib.Path | None = None
         # Hash for file change.
         self.artworkDigest: bytes | None = None
+        self.nativeTextureLayout: TextureLayout | None = None
         self.artworkRetryCount = 0
         self.artworkReloadEnabled = self.settings.value(
             "preferences/autoReloadArtwork", False, bool
@@ -853,14 +411,17 @@ class AnimationEditor(AnimationSerialization):
         self.ui.actionExit.triggered.connect(lambda: self.exit_application())
 
         self.recentFileActions: list[QtGui.QAction] = []
+        self.recent_preview_actions: list[QtGui.QAction] = []
 
-        for i in range(self.MAX_RECENT):
-            action = QtGui.QAction(self.window, visible=False)
-            action.triggered.connect(
-                lambda checked=False, a=action: self.load_recent_file(a)
-            )
-            self.recentFileActions.append(action)
-            self.ui.menuRecent.addAction(action)
+        for actions, menu in ((self.recentFileActions, self.ui.menuRecent),
+                              (self.recent_preview_actions, self.ui.menuRecentPreviews)):
+            for i in range(self.MAX_RECENT):
+                action = QtGui.QAction(self.window, visible=False)
+                action.triggered.connect(
+                    lambda checked=False, a=action: self.load_recent_file(a)
+                )
+                actions.append(action)
+                menu.addAction(action)
 
         self._update_recent_actions()
 
@@ -873,23 +434,32 @@ class AnimationEditor(AnimationSerialization):
         self.action_pt_image: pyglet.image.ImageData | None = None
         self.action_grid: TopLeftGrid | None = None
         self.action_points: dict[int, ActionPoints] = {}
+        self.action_point_names = ()
+        self.rig_profile = None
+        self.rig_profile_id = None
+        self._rig_profile_loaded = None
+        self._rig_profile_stamp = None
+        self._rig_profile_warning = ""
+        self.sheet_point_names = []
         self.selected_sheet_frame: int | None = None
         self.sheet_preview_images: dict[int, QImage] = {}
         self.loaded_action_points: dict[int, ActionPoints] = {}
 
         self.shadow_image = self._shadow_image_data(template_image())
         self._shadow_size = 0
-        self._shadow_display_images: dict[int, pyglet.image.ImageData] = {}
+        self._shadow_display_images: dict[tuple[int, str], pyglet.image.ImageData] = {}
+        self.shadow_color = "#000000"
 
         self.sprite = None
         self.shadow: pyglet.sprite.Sprite | None = None
 
-        self.marker_size = 5
-        self.action_point_marker = create_plus_image(
+        self.marker_size = 3
+        self.action_point_marker = create_point_marker(
             self.marker_size, (255, 255, 255, 255)
         )
         self.action_point_marker.anchor_x = self.marker_size // 2
         self.action_point_marker.anchor_y = self.marker_size // 2
+        self._action_point_markers = {}
         self.left_hand: pyglet.sprite.Sprite | None = None
         self.center: pyglet.sprite.Sprite | None = None
         self.right_hand: pyglet.sprite.Sprite | None = None
@@ -918,6 +488,8 @@ class AnimationEditor(AnimationSerialization):
         self.current_anim_frame: AnimFrame | None = None
         self.displayed_anim_frame: AnimFrame | None = None
         self.onionSprites: list[pyglet.sprite.Sprite] = []
+        self.onion_shadow_sprites: list[pyglet.sprite.Sprite] = []
+        self.onion_shadows_enabled = self.settings.value("preferences/onionShadows", False, bool)
         self.onionPreviewEnabled = self.settings.value("preferences/onionPreview", False, bool)
         self.onionPreviousFrames = max(0, min(5, self.settings.value("preferences/onionPreviousFrames", 1, int)))
         self.onionNextFrames = max(0, min(5, self.settings.value("preferences/onionNextFrames", 1, int)))
@@ -948,7 +520,7 @@ class AnimationEditor(AnimationSerialization):
 
         for dir_idx, button in enumerate(self.directionButtons):
             button.clicked.connect(
-                partial(self.set_direction, self.directionButtons.index(button))
+                partial(self.choose_direction, self.directionButtons.index(button))
             )
             button.setCheckable(True)
 
@@ -956,10 +528,15 @@ class AnimationEditor(AnimationSerialization):
         self.ui.rotateLeftButton.clicked.connect(lambda: self.rotate_direction(-1))
         self.ui.rotateRightButton.clicked.connect(lambda: self.rotate_direction(1))
 
-        self.openGLWidget = self.ui.openGLWidget = PygletWidget(
+        self.openGLWidget = self.ui.openGLWidget = (preview_factory or PygletWidget)(
             240, 220, self.ui.verticalFrame_3, self.window, self
         )
-        self.openGLWidget.setMinimumSize(QtCore.QSize(240, 220))
+        # A maximized window can be shorter than its layout minimum on RDP.
+        # Let the canvas yield height to the playback/footer rows instead of
+        # painting over them. Keep one pixel for a valid GL projection.
+        self.openGLWidget.setMinimumSize(QtCore.QSize(240, 1))
+        self.openGLWidget.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
         self.openGLWidget.setMaximumSize(QtCore.QSize(16777215, 16777215))
         self.openGLWidget.setObjectName("openGLWidget")
         self.ui.gridLayout.addWidget(self.openGLWidget, 0, 0, 1, 1)
@@ -1008,6 +585,8 @@ class AnimationEditor(AnimationSerialization):
         )
         self.ui.onionPreviewCheckBox.setChecked(self.onionPreviewEnabled)
         self.ui.onionPreviewCheckBox.toggled.connect(self.changeOnionPreview)
+        self.ui.onionShadowsCheckBox.setChecked(self.onion_shadows_enabled)
+        self.ui.onionShadowsCheckBox.toggled.connect(self.change_onion_shadows)
         self.setOnionRange(-self.onionPreviousFrames, self.onionNextFrames)
         self.ui.onionRangeSlider.rangeChanged.connect(self.changeOnionRange)
         self.setOnionOpacity(self.onionOpacity)
@@ -1037,6 +616,10 @@ class AnimationEditor(AnimationSerialization):
 
         self.ui.shadowSizeComboBox.currentIndexChanged.connect(self.apply_shadow_size)
         self.ui.previewShadowCheckBox.toggled.connect(self._refresh_shadow_display)
+        self.set_shadow_color(self.settings.value("preferences/shadowColor", "#000000", str))
+        self.ui.shadowColorButton.clicked.connect(self.choose_shadow_color)
+        self.ui.keepDirectionFrameCheckBox.setChecked(self.settings.value("preferences/keepDirectionFrame", False, bool))
+        self.ui.keepDirectionFrameCheckBox.toggled.connect(self.change_keep_direction_frame)
         self.ui.showActionPointsCheckBox.toggled.connect(self.setActionPointsVisible)
         self.pointDragState: tuple[int, EditState] | None = None
         self.ui.sheetFramePicture.pointDragStarted.connect(self.beginPointDrag)
@@ -1051,11 +634,21 @@ class AnimationEditor(AnimationSerialization):
         self.ui.actionPointsOpacitySlider.valueChanged.connect(
             partial(self.setPreviewOpacity, "actionPoints")
         )
+        self.ui.actionPointsSizeSlider.valueChanged.connect(self.changeActionPointSize)
         for pointName in ("leftHand", "rightHand", "head", "center"):
             for spinBox in self.ui.actionPointSpinBoxes[pointName]:
                 spinBox.valueChanged.connect(
                     partial(self.actionPointChanged, pointName)
                 )
+        self.ui.loadRigProfileButton.clicked.connect(self.chooseRigProfile)
+        self.ui.projectRigComboBox.currentIndexChanged.connect(self.choose_project_rig)
+        self.ui.unlinkRigProfileButton.clicked.connect(lambda: self.setRigProfile(None))
+        self.ui.actionPointComboBox.currentIndexChanged.connect(self.refreshNamedPointControls)
+        self.ui.addActionPointButton.clicked.connect(self.promptLocalPoint)
+        self.ui.pointDefinedCheckBox.toggled.connect(self.setNamedPointDefined)
+        for spin in self.ui.namedPointSpinBoxes:
+            spin.valueChanged.connect(self.namedPointChanged)
+        self.refreshNamedPointControls()
 
     def captureEditState(self) -> EditState:
         """Snapshot editable metadata without copying artwork or GL resources."""
@@ -1069,7 +662,221 @@ class AnimationEditor(AnimationSerialization):
                 self.ui.animationFrameList.row(item)
                 for item in self.ui.animationFrameList.selectedItems()
             )),
+            self.action_point_names, self.rig_profile,
+            tuple(sorted(item.idx for item in self.ui.loadedSheetFrameList.selectedItems())),
+            self.rig_profile_id,
         )
+
+    def chooseRigProfile(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self.window, "Load Project or Rig Profile", str(self.rig_profile or ""), "Project and Rig Profiles (*.yaml *.yml)")
+        if path:
+            from project import load_rig_profiles
+            try:
+                rigs = load_rig_profiles(path)
+                if not rigs:
+                    raise FormatError("This project profile has no rigs. Add entries under rigs to use it for Action Points.")
+            except FormatError as error:
+                self.create_error_popup(str(error))
+                return
+            ids = list(rigs)
+            selected = ids[0]
+            if len(ids) > 1:
+                labels = [f"{rigs[key].name} ({key})" for key in ids]
+                current = ids.index(self.rig_profile_id) if self.rig_profile_id in ids else 0
+                label, accepted = QtWidgets.QInputDialog.getItem(
+                    self.window, "Choose Rig", "Rig:", labels, current, False)
+                if not accepted:
+                    return
+                selected = ids[labels.index(label)]
+            self.setRigProfile(path, selected)
+
+    def refresh_project_rig_selector(self) -> None:
+        host = self.document_host
+        project = host.project_profile if host else None
+        combo = self.ui.projectRigComboBox
+        combo.setVisible(project is not None)
+        self.ui.loadRigProfileButton.setVisible(project is None)
+        self.ui.unlinkRigProfileButton.setVisible(project is None)
+        combo.setEnabled(self.image_grid is not None and not self.frozen_preview)
+        with QtCore.QSignalBlocker(combo):
+            combo.clear()
+            if project is None:
+                return
+            combo.addItem("None (local points)", None)
+            for rig_id, rig in project.rigs.items():
+                combo.addItem(f"{rig.name} ({rig_id})", rig_id)
+                combo.setItemData(combo.count() - 1, f"{rig.name}\n{host.project_path}\nRig: {rig_id}",
+                                  QtCore.Qt.ItemDataRole.ToolTipRole)
+            if self.rig_profile is not None:
+                same_project = host._path_key(self.rig_profile) == host._path_key(host.project_path)
+                rig_id = self.rig_profile_id
+                if same_project and rig_id is None and len(project.rigs) == 1:
+                    rig_id = next(iter(project.rigs))
+                index = combo.findData(rig_id) if same_project and rig_id in project.rigs else -1
+                if index < 0:
+                    name = self._rig_profile_loaded.name if self._rig_profile_loaded else self.rig_profile_id or self.rig_profile.name
+                    combo.addItem(f"Current: {name} (outside project or unavailable)", None)
+                    combo.setItemData(combo.count() - 1, str(self.rig_profile), QtCore.Qt.ItemDataRole.ToolTipRole)
+                    index = combo.count() - 1
+                combo.setCurrentIndex(index)
+
+    def choose_project_rig(self, index: int) -> None:
+        host = self.document_host
+        if not host or host.project_profile is None or self.image_grid is None or self.frozen_preview:
+            return
+        rig_id = self.ui.projectRigComboBox.itemData(index)
+        if index == 0:
+            self.setRigProfile(None)
+        elif rig_id in host.project_profile.rigs:
+            self.setRigProfile(host.project_path, rig_id)
+
+    @undoable("Change Rig Profile")
+    def setRigProfile(self, path, rig_id=None):
+        self.rig_profile = pathlib.Path(path).resolve() if path else None
+        self.rig_profile_id = rig_id if path else None
+        self.refreshRigProfile(force=True)
+
+    def refreshRigProfile(self, *, force=False):
+        if self.frozen_preview:
+            return
+        from project import load_rig_profile
+        path = self.rig_profile
+        try:
+            stat = path.stat() if path else None
+            stamp = (str(path), self.rig_profile_id, stat.st_mtime_ns, stat.st_size, stat.st_ctime_ns) if stat else None
+        except OSError:
+            stamp = (str(path), self.rig_profile_id, "missing")
+        if not force and stamp == self._rig_profile_stamp:
+            return
+        self._rig_profile_stamp = stamp
+        self._rig_profile_loaded = None
+        self._rig_profile_warning = ""
+        if path:
+            try:
+                self._rig_profile_loaded = load_rig_profile(path, self.rig_profile_id)
+            except FormatError as error:
+                self._rig_profile_warning = str(error)
+        self.refreshNamedPointControls()
+
+    def refreshNamedPointControls(self, *_):
+        from project import available_point_names
+        ui = self.ui
+        names = available_point_names(self.action_points, self.action_point_names, self._rig_profile_loaded)
+        previous = ui.actionPointComboBox.currentData()
+        with QtCore.QSignalBlocker(ui.actionPointComboBox):
+            ui.actionPointComboBox.clear()
+            body = self.action_points.get(self.selected_sheet_frame)
+            for name in names:
+                defined = body is not None and body.get(name) is not None
+                scope = "Rig Profile" if self._rig_profile_loaded and name in self._rig_profile_loaded.action_points else "Local"
+                ui.actionPointComboBox.addItem(f"{name} [{scope}]" + (" (unset)" if not defined else ""), name)
+            if previous in names:
+                ui.actionPointComboBox.setCurrentIndex(names.index(previous))
+        name = ui.actionPointComboBox.currentData()
+        point = body.get(name) if body and name else None
+        defined_names = [key for key, _ in body.items()] if body else []
+        self.ui.sheetFramePicture.selectedPoint = defined_names.index(name) if name in defined_names else None
+        self.ui.sheetFramePicture.setToolTip(
+            f"Action Point: {name or '(none)'}. Drag a dot to move it; Escape cancels.")
+        self.ui.sheetFramePicture.update()
+        selected = self.selected_sheet_frame is not None and name is not None and not self.frozen_preview
+        with QtCore.QSignalBlocker(ui.pointDefinedCheckBox):
+            ui.pointDefinedCheckBox.setChecked(point is not None)
+            ui.pointDefinedCheckBox.setEnabled(selected)
+        for spin, value in zip(ui.namedPointSpinBoxes, point.data() if point else (0, 0)):
+            with QtCore.QSignalBlocker(spin):
+                spin.setValue(value)
+                spin.setEnabled(selected and point is not None)
+        profile = self._rig_profile_loaded
+        missing = [name for name in profile.suggested_actions if not any(g.name == name for g in self.groups)] if profile else []
+        status = []
+        if self._rig_profile_warning:
+            status.append("Cannot load rig profile:\n" + self._rig_profile_warning)
+        if missing:
+            status.append("Suggested actions missing:\n" + "\n".join(missing))
+        status_text = "\n\n".join(status)
+        ui.rigProfileStatusLabel.setToolTip(status_text)
+        ui.rigProfileStatusLabel.setAccessibleDescription(status_text)
+        ui.rigProfileStatusLabel.setVisible(bool(status))
+        profile_details = (str(self.rig_profile or "") +
+                           (f"\nRig: {self.rig_profile_id}" if self.rig_profile_id else ""))
+        ui.projectRigComboBox.setToolTip(
+            "Choose a rig from the loaded project for this sprite. None unlinks the profile without changing authored coordinates."
+            + ("\n" + profile_details if self.rig_profile else ""))
+        ui.loadRigProfileButton.setText(profile.name + "…" if profile else
+                                       "Unavailable profile…" if self.rig_profile else "Load Profile…")
+        ui.loadRigProfileButton.setToolTip(
+            "Choose a named rig from a YAML Project Profile, or load a standalone YAML Rig Profile."
+            + ("\nCurrent: " + profile.name if profile else "")
+            + ("\n" + profile_details if self.rig_profile else ""))
+        ui.unlinkRigProfileButton.setEnabled(self.rig_profile is not None and not self.frozen_preview)
+        ui.loadRigProfileButton.setEnabled(self.image_grid is not None and not self.frozen_preview)
+        self.refresh_project_rig_selector()
+        ui.addActionPointButton.setEnabled(self.image_grid is not None and not self.frozen_preview)
+        self.updateActionPointActions()
+
+    def promptLocalPoint(self):
+        name, accepted = QtWidgets.QInputDialog.getText(self.window, "New Action Point", "Name:")
+        if accepted:
+            try:
+                self.addLocalPoint(name)
+            except FormatError as error:
+                self.create_error_popup(str(error))
+
+    @undoable("Add Action Point")
+    def addLocalPoint(self, name):
+        from project import validate_point_name
+        validate_point_name(name)
+        if name not in self.action_point_names:
+            self.action_point_names = (*self.action_point_names, name)
+        self.refreshNamedPointControls()
+        self.ui.actionPointComboBox.setCurrentIndex(self.ui.actionPointComboBox.findData(name))
+
+    @undoable("Set Action Point")
+    def setNamedPointDefined(self, defined):
+        index, name = self.selected_sheet_frame, self.ui.actionPointComboBox.currentData()
+        if index is None or name is None:
+            return
+        body = self.action_points.setdefault(index, ActionPoints.from_named({}))
+        body.set(name, Offset() if defined else None)
+        self.refreshNamedPointControls()
+        self.refreshActionPointEdits(index)
+
+    @undoable("Move Action Point")
+    def namedPointChanged(self, *_):
+        index, name = self.selected_sheet_frame, self.ui.actionPointComboBox.currentData()
+        if index is None or name is None:
+            return
+        body = self.action_points.get(index)
+        if body is None or body.get(name) is None:
+            return
+        body.set(name, Offset(*(spin.value() for spin in self.ui.namedPointSpinBoxes)))
+        self.selectSheetFrame(index)
+        self.refreshActionPointEdits(index)
+
+
+
+
+
+
+    def push_edit_command(self, text: str, before: EditState, after: EditState) -> None:
+        self.undoStack.push(SpriteEditCommand(self, text, before, after))
+
+    def openLayers(self):
+        if self.sheet_image is not None:
+            self.workspace.show_add_menu(self.ui.layerTabs)
+
+    def clearPointPreview(self):
+        if self.point_preview is not None:
+            self.point_preview.release_view(self)
+
+    def updateLayerPreview(self) -> None:
+        if getattr(self, "point_preview", None) is not None:
+            self.point_preview.render(self)
+            return
+        if self.sprite is not None and self.workspace:
+            self.sprite.visible = self.workspace.body_visible
 
     def openResizeFrames(self) -> None:
         if self.sheet_image is None:
@@ -1108,6 +915,8 @@ class AnimationEditor(AnimationSerialization):
             self._add_frames_from_grid()
 
     def resizeFrameCells(self, width: int, height: int, *, centerArtwork: bool = False) -> bool:
+        if self.frozen_preview:
+            return False
         if (width, height) == (self.frame_width, self.frame_height) and not centerArtwork:
             return False
         before = self.captureEditState()
@@ -1148,6 +957,10 @@ class AnimationEditor(AnimationSerialization):
             self.groups, self.action_points = copy.deepcopy(
                 (state.groups, state.action_points)
             )
+            self.action_point_names, self.rig_profile = state.action_point_names, state.rig_profile
+            self.rig_profile_id = state.rig_profile_id
+            self.refreshRigProfile(force=True)
+            self.clearPointPreview()
             self.shadow_size_present = state.shadow_size_present
             self.shadow_size = state.shadow_size
             if self.savedEditSignature is not None:
@@ -1199,6 +1012,13 @@ class AnimationEditor(AnimationSerialization):
                     if item is not None:
                         item.setSelected(True)
             self.selectSheetFrame(state.sheet_frame)
+            selected_cells = set(state.sheet_frame_selection)
+            with QtCore.QSignalBlocker(self.ui.loadedSheetFrameList):
+                self.ui.loadedSheetFrameList.clearSelection()
+                for row in range(self.ui.loadedSheetFrameList.count()):
+                    item = self.ui.loadedSheetFrameList.item(row)
+                    item.setSelected(item.idx in selected_cells)
+            self.updateActionPointActions()
             if self.sprite is not None:
                 self.sprite.visible = spriteVisible
                 self.shadow.visible = shadowVisible
@@ -1253,20 +1073,22 @@ class AnimationEditor(AnimationSerialization):
                 ),
                 -1,
             )
-            self.ui.loadedSheetFrameList.setCurrentRow(row)
+            if self.ui.loadedSheetFrameList.currentRow() != row:
+                self.ui.loadedSheetFrameList.setCurrentRow(row, QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect)
         self.ui.sheetFrameScopeLabel.setText(
-            f"Current Frame: {index if index is not None else '-'}"
+            f"Sheet frame: {index if index is not None else '-'}"
         )
         body = self.action_points.get(index, ActionPoints())
         for pointName, spinBoxes in self.ui.actionPointSpinBoxes.items():
             fieldName = {"leftHand": "left_hand", "rightHand": "right_hand"}.get(
                 pointName, pointName
             )
-            offset = getattr(body, fieldName)
+            offset = body.get(fieldName) or Offset()
             for spinBox, value in zip(spinBoxes, offset.data()):
                 with QtCore.QSignalBlocker(spinBox):
                     spinBox.setValue(value)
-                    spinBox.setEnabled(index is not None)
+                    spinBox.setEnabled(index is not None and not self.frozen_preview)
+        self.refreshNamedPointControls()
         self.refreshSheetFramePreview()
 
         self.updateActionPointActions()
@@ -1285,14 +1107,14 @@ class AnimationEditor(AnimationSerialization):
             ).copy()
             self.sheet_preview_images[index] = qim
         body = self.action_points.get(index)
+        self.sheet_point_names = [name for name, _ in body.items()] if body else []
         points = (
             []
             if body is None
             else [
                 (point.x + image.width // 2, point.y + image.height // 2, color)
-                for point, color in zip(
-                    body.all_pos(), ((255, 0, 0), (0, 255, 0), (0, 0, 255), (0, 0, 0))
-                )
+                for name, point in body.items()
+                for color in [self.actionPointColor(name)]
             ]
         )
         self.ui.sheetFramePicture.setFrame(
@@ -1303,6 +1125,8 @@ class AnimationEditor(AnimationSerialization):
         )
 
     def setArtworkReloadEnabled(self, enabled: bool) -> None:
+        if self.frozen_preview:
+            enabled = False
         if self.artworkReloadEnabled == enabled:
             return
         self.artworkReloadEnabled = enabled
@@ -1327,8 +1151,11 @@ class AnimationEditor(AnimationSerialization):
         self.artworkReloadTimer.stop()
         self.artworkPath = None
         self.artworkDigest = None
-        if self.sheet_format == SheetFormat.SINGLE and self.sheet_image is not None:
-            self.artworkPath = pathlib.Path(self.file_name).resolve().with_name("Anim.png")
+        self.nativeTextureLayout = None
+        if self.file_name and self.sheet_format in (SheetFormat.SINGLE, SheetFormat.NATIVE) and self.sheet_image is not None:
+            self.artworkPath = pathlib.Path(self.file_name).resolve().with_name(self.texture_name)
+            if self.sheet_format == SheetFormat.NATIVE:
+                self.nativeTextureLayout = read_texture_layout(self.file_name)
             self.artworkDigest = sha256(
                 self.sheet_image.get_data("RGBA", -self.sheet_image.width * 4)
             ).digest()
@@ -1345,7 +1172,15 @@ class AnimationEditor(AnimationSerialization):
         try:
             with Image.open(self.artworkPath) as source:
                 image = source.convert("RGBA")
+            if self.nativeTextureLayout is not None:
+                if self.nativeTextureLayout.frame_size != (self.frame_width, self.frame_height):
+                    raise FormatError("Frame dimensions changed. Reopen the sheet to load its new layout.")
+                image = unpack_texture(image, self.nativeTextureLayout)
             pixels = image.tobytes()
+        except FormatError as error:
+            self.ui.statusBar.showMessage(str(error), 5000)
+            self.updateArtworkWatch()
+            return
         except OSError:
             # Saves may briefly leave an incomplete or missing file.
             self.artworkRetryCount += 1
@@ -1396,6 +1231,10 @@ class AnimationEditor(AnimationSerialization):
         self.ui.statusBar.showMessage("Artwork reloaded.", 3000)
 
     def beginPointDrag(self) -> None:
+        if self.frozen_preview:
+            return
+        if self.point_preview is not None:
+            self.point_preview.pause_for_edit(self)
         index = self.selected_sheet_frame
         if index is not None and index in self.action_points:
             self.pointDragState = (index, self.captureEditState())
@@ -1404,13 +1243,14 @@ class AnimationEditor(AnimationSerialization):
         if self.pointDragState is None:
             return
         index, _ = self.pointDragState
-        name = ("left_hand", "center", "right_hand", "head")[point]
+        name = self.sheet_point_names[point]
+        self.ui.actionPointComboBox.setCurrentIndex(self.ui.actionPointComboBox.findData(name))
         offset = Offset(max(-32768, min(32767, x - self.frame_width // 2)),
                         max(-32768, min(32767, y - self.frame_height // 2)))
         body = self.action_points[index]
-        if getattr(body, name) == offset:
+        if body.get(name) == offset:
             return
-        setattr(body, name, offset)
+        body.set(name, offset)
         self.selectSheetFrame(index)
         self.refreshActionPointEdits(index)
 
@@ -1451,6 +1291,7 @@ class AnimationEditor(AnimationSerialization):
             and 0 <= index < len(self.image_grid)
         )
         self.copyActionPointsAction.setEnabled(selected and index in self.action_points)
+        self.copyActionPointAction.setEnabled(selected and self.ui.actionPointComboBox.currentData() is not None)
         self.pasteActionPointsAction.setEnabled(
             selected and owner.actionPointsClipboard is not None
         )
@@ -1461,12 +1302,26 @@ class AnimationEditor(AnimationSerialization):
             return
         owner = self.document_host or self
         owner.actionPointsClipboard = copy.deepcopy(body)
+        self.updateActionPointClipboardActions()
+        self.ui.statusBar.showMessage(
+            f"Copied all action points from sheet frame {self.selected_sheet_frame}.", 4000
+        )
+
+    def copyActionPoint(self) -> None:
+        index = self.selected_sheet_frame
+        name = self.ui.actionPointComboBox.currentData()
+        if index is None or name is None or self.image_grid is None or not 0 <= index < len(self.image_grid):
+            return
+        body = self.action_points.get(index)
+        point = body.get(name) if body is not None else None
+        (self.document_host or self).actionPointsClipboard = CopiedActionPoint(name, point.data() if point is not None else None)
+        self.updateActionPointClipboardActions()
+        self.ui.statusBar.showMessage(f"Copied action point '{name}' from sheet frame {index}.", 4000)
+
+    def updateActionPointClipboardActions(self) -> None:
         editors = self.document_host._editors.values() if self.document_host else (self,)
         for editor in editors:
             editor.updateActionPointActions()
-        self.ui.statusBar.showMessage(
-            f"Copied action points from sheet frame {self.selected_sheet_frame}.", 4000
-        )
 
     @undoable("Paste Action Points")
     def pasteActionPoints(self) -> bool:
@@ -1477,20 +1332,45 @@ class AnimationEditor(AnimationSerialization):
             or not 0 <= index < len(self.image_grid)
         ):
             return False
-        body = copy.deepcopy(self.action_points.get(index, ActionPoints()))
-        for name in ("left_hand", "right_hand", "head", "center"):
-            setattr(body, name, copy.deepcopy(getattr(source, name)))
-        if body == self.action_points.get(index):
+        indices = sorted({item.idx for item in self.ui.loadedSheetFrameList.selectedItems()}) or [index]
+        changes = {}
+        for target in indices:
+            previous = self.action_points.get(target)
+            if isinstance(source, CopiedActionPoint):
+                point = previous.get(source.name) if previous is not None else None
+                if (point.data() if point is not None else None) == source.position:
+                    continue
+                body = copy.deepcopy(previous) if previous is not None else ActionPoints.from_named({})
+                body.set(source.name, Offset(*source.position) if source.position is not None else None)
+            else:
+                body = copy.deepcopy(source)
+            if body != previous:
+                changes[target] = body
+        if not changes:
             return False
-        self.action_points[index] = body
+        if len(indices) > 1:
+            scope = f"action point '{source.name}'" if isinstance(source, CopiedActionPoint) else "all action points"
+            choice = QtWidgets.QMessageBox.question(
+                self.window, "Paste Action Points?",
+                f"Paste {scope} onto {len(indices)} selected sheet frames?\n\n"
+                "This changes every animation that uses these sheet cells.",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if choice != QtWidgets.QMessageBox.StandardButton.Yes:
+                return False
+        self.action_points.update(changes)
         self.selectSheetFrame(index)
-        self.refreshActionPointEdits(index)
+        if isinstance(source, CopiedActionPoint):
+            self.ui.actionPointComboBox.setCurrentIndex(self.ui.actionPointComboBox.findData(source.name))
+        self.refreshActionPointEdits(set(changes))
         return True
 
-    def refreshActionPointEdits(self, index: int) -> None:
+    def refreshActionPointEdits(self, index: int | Iterable[int]) -> None:
+        indices = {index} if isinstance(index, int) else set(index)
         for groupItem in self._get_action_list_items():
             if any(
-                other.frame_index == index
+                other.frame_index in indices
                 for sequence in groupItem.anim_group.directions
                 for other in sequence.frames
             ):
@@ -1536,7 +1416,7 @@ class AnimationEditor(AnimationSerialization):
         if size in (0, 1, 2):
             with QtCore.QSignalBlocker(self.ui.shadowSizeComboBox):
                 self.ui.shadowSizeComboBox.setCurrentIndex(size)
-            self.ui.shadowSizeComboBox.setEnabled(self.loaded_tree is not None)
+            self.ui.shadowSizeComboBox.setEnabled(self.sheet_format is not None)
         if hasattr(self, "openGLWidget") and size in (0, 1, 2):
             self._refresh_shadow_display()
 
@@ -1544,21 +1424,54 @@ class AnimationEditor(AnimationSerialization):
         if not self.ui.previewShadowCheckBox.isChecked():
             return self.shadow_image
         size = self.shadow_size
-        if size not in self._shadow_display_images:
-            self._shadow_display_images[size] = self._shadow_image_data(
-                shadow_image(size, black=True)
-            )
-        return self._shadow_display_images[size]
+        key = (size, self.shadow_color)
+        if key not in self._shadow_display_images:
+            mask = shadow_image(size, black=True)
+            image = Image.new("RGBA", mask.size, self.shadow_color)
+            image.putalpha(mask.getchannel("A"))
+            self._shadow_display_images[key] = self._shadow_image_data(image)
+        return self._shadow_display_images[key]
+
+    def set_shadow_color(self, value: str) -> None:
+        color = QtGui.QColor(value)
+        self.shadow_color = color.name() if color.isValid() else "#000000"
+        self.ui.shadowColorButton.setStyleSheet(
+            f"QToolButton {{ background-color: {self.shadow_color}; border: 1px solid palette(mid); border-radius: 3px; }}"
+        )
+        self._shadow_display_images.clear()
+        self._refresh_shadow_display()
+
+    def choose_shadow_color(self) -> None:
+        color = QtWidgets.QColorDialog.getColor(QtGui.QColor(self.shadow_color), self.window, "Shadow Preview Color")
+        if not color.isValid():
+            return
+        self.settings.setValue("preferences/shadowColor", color.name())
+        editors = self.document_host.preview_editors() if self.document_host else (self,)
+        for editor in editors:
+            editor.set_shadow_color(color.name())
+        self.ui.previewShadowCheckBox.setChecked(True)
+        self.settings.sync()
+
+    def change_keep_direction_frame(self, enabled: bool) -> None:
+        self.settings.setValue("preferences/keepDirectionFrame", enabled)
+        editors = self.document_host.preview_editors() if self.document_host else (self,)
+        for editor in editors:
+            with QtCore.QSignalBlocker(editor.ui.keepDirectionFrameCheckBox):
+                editor.ui.keepDirectionFrameCheckBox.setChecked(enabled)
+        self.settings.sync()
 
     def _refresh_shadow_display(self) -> None:
         if self.shadow is not None:
             self.openGLWidget.makeCurrent()
             self.shadow.image = self._display_shadow_image()
-            self.openGLWidget.update()
+            self.updateOnionPreview(self.displayed_anim_frame or self.current_anim_frame)
+        if self.point_preview is not None:
+            self.point_preview.refresh()
+        self.openGLWidget.update()
 
     @undoable("Change Shadow Size")
     def apply_shadow_size(self, size: int) -> None:
-        if not self.loaded_tree:
+        if self.sheet_format is None:
             return
         self.shadow_size = size
         # An explicit selection writes ShadowSize even if it was omitted on input.
@@ -1618,7 +1531,7 @@ class AnimationEditor(AnimationSerialization):
     def open_batch_add(self) -> None:
         if self.newWindow is None:
             source = str(pathlib.Path(self.file_name).parent) if self.file_name else ""
-            self.newWindow = ActionAliasDialog(source)
+            self.newWindow = ActionAliasDialog(source, self.window)
         self.newWindow.show()
         self.newWindow.raise_()
         self.newWindow.activateWindow()
@@ -1654,43 +1567,55 @@ class AnimationEditor(AnimationSerialization):
 
                     self.set_animation()
 
-    def save_action_trigger(self) -> None:
-        if self.loaded_tree:
-            self._save_document(self.file_name)
+    def save_action_trigger(self) -> bool:
+        if self.frozen_preview:
+            return False
+        if self.sheet_format is None:
+            return False
+        if self.sheet_format != SheetFormat.NATIVE or not self.file_name:
+            return self.save_as_action_trigger()
+        return self._save_document(self.file_name)
 
-    def save_as_action_trigger(self) -> None:
-        if self.loaded_tree:
-            label = self.sheet_format.value
+    def save_as_action_trigger(self) -> bool:
+        if self.frozen_preview:
+            return False
+        if self.sheet_format is not None:
+            if self.file_name:
+                suggested = pathlib.Path(self.file_name)
+            elif self.source_image_path is not None:
+                suggested = self.source_image_path.with_name(f"{self.source_image_path.stem}-sprite.json")
+            else:
+                suggested = pathlib.Path("Sprite.json")
+            if self.sheet_format != SheetFormat.NATIVE:
+                suggested = suggested.with_name(SheetFormat.NATIVE.value)
             file_name, _ = QFileDialog.getSaveFileName(
-                self.window, f"Save {label}", self.file_name, f"{label} data (*.xml)"
+                self.window, "Save Sprite", str(suggested), "Sprite document (*.json)"
             )
             if file_name:
-                self._save_document(file_name)
+                target = pathlib.Path(file_name)
+                if not target.suffix:
+                    target = target.with_suffix(".json")
+                return self._save_document(target)
+        return False
 
     def _save_document(self, file_name: str | PathLike[str]) -> bool:
+        if self.frozen_preview:
+            return False
         if not file_name:
             return False
         target = pathlib.Path(file_name)
         if self.document_host and not self.document_host.can_save_path(self, target):
             return False
-        other = (
-            SheetFormat.MULTI
-            if self.sheet_format == SheetFormat.SINGLE
-            else SheetFormat.SINGLE
-        )
-        if target.name.casefold() == other.value.casefold():
-            self.create_error_popup(
-                f"Use Export to {other.value} to convert this animation."
-            )
-            return False
-        if not self._export_bundle(target.parent, self.sheet_format, target.name):
+        if not self._export_bundle(target.parent, SheetFormat.NATIVE, target.name):
             return False
         self.file_name = str(target)
-        self.loaded_tree = ElementTree.parse(target)
+        self.sheet_format = SheetFormat.NATIVE
+        self.loaded_tree = None
+        self.texture_name = target.with_suffix(".png").name
+        self.single_loaded = True
+        self.ui.groupBox_5.setTitle("Sprite Sheet (JSON)")
         self.trackArtwork()
-        self.shadow_size_present = (
-            self.loaded_tree.getroot().find("ShadowSize") is not None
-        )
+        self.shadow_size_present = self.shadow_size_present or self.shadow_size != self.loaded_shadow_size
         self.loaded_shadow_size = self.shadow_size
         for item in self._get_action_list_items():
             item.anim_group.modified = False
@@ -2079,39 +2004,66 @@ class AnimationEditor(AnimationSerialization):
         if item:
             self._move_frame(1)
 
+    def _read_recent_files(self) -> None:
+        """Partition the old mixed history and retain independent capped histories."""
+        sprites, previews = [], []
+        seen = set()
+        for key in ("recent_sprites", "recent_previews", "recent"):
+            for path in self.settings.value(key, [], list):
+                if not isinstance(path, str) or not path:
+                    continue
+                identity = os.path.normcase(os.path.realpath(path))
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                (previews if is_preview_path(path) else sprites).append(path)
+        self.recent_files = sprites[:self.MAX_RECENT]
+        self.recent_preview_files = previews[:self.MAX_RECENT]
+        self.settings.setValue("recent_sprites", self.recent_files)
+        self.settings.setValue("recent_previews", self.recent_preview_files)
+        self.settings.remove("recent")
+
     def add_recent_list(self, path: str | PathLike[str]) -> None:
-        path = str(path)
-        if self.document_host:
-            self.recent_files = self.settings.value("recent", [], list)
-        # Push to top.
-        try:
-            self.recent_files.remove(path)
-        except ValueError:
-            pass
-
-        self.recent_files.insert(0, path)
-
-        self.recent_files = self.recent_files[: self.MAX_RECENT]
-
-        self.settings.setValue("recent", self.recent_files)
-
+        path = str(pathlib.Path(path).resolve())
+        self._read_recent_files()
+        key = "recent_previews" if is_preview_path(path) else "recent_sprites"
+        entries = self.recent_preview_files if is_preview_path(path) else self.recent_files
+        identity = os.path.normcase(os.path.realpath(path))
+        entries = [path, *(entry for entry in entries if os.path.normcase(os.path.realpath(entry)) != identity)]
+        self.settings.setValue(key, entries[:self.MAX_RECENT])
+        self._read_recent_files()
         self._update_recent_actions()
         if self.document_host:
             self.document_host.refresh_recent_files()
 
     def _update_recent_actions(self) -> None:
-        recent_count = min(len(self.recent_files), self.MAX_RECENT)
+        self._populate_recent_actions(self.recent_files, self.recentFileActions)
+        self._populate_recent_actions(self.recent_preview_files, self.recent_preview_actions)
+
+    def _populate_recent_actions(self, entries, actions) -> None:
+        recent_count = min(len(entries), self.MAX_RECENT)
+        paths = [pathlib.Path(path) for path in entries[:recent_count]]
 
         for i in range(recent_count):
-            action = self.recentFileActions[i]
-            path = self.recent_files[i]
-            action.setText(QFileInfo(path).fileName())
-            action.setText(f"{QFileInfo(path).filePath()}")
+            action = actions[i]
+            path = entries[i]
+            parts = paths[i].parts
+            # Include only enough parent folders to distinguish matching names.
+            depth = 1
+            while depth < len(parts) and any(
+                j != i and other.parts[-depth:] == parts[-depth:]
+                for j, other in enumerate(paths)
+            ):
+                depth += 1
+            label = str(pathlib.Path(*parts[-depth:]))
+            action.setText(label.replace("&", "&&"))
+            action.setToolTip(path)
+            action.setStatusTip(path)
             action.setVisible(True)
             action.setData(path)
 
         for m in range(recent_count, self.MAX_RECENT):
-            self.recentFileActions[m].setVisible(False)
+            actions[m].setVisible(False)
 
     @undoable("Delete Action")
     def delete_action(self) -> None:
@@ -2128,6 +2080,14 @@ class AnimationEditor(AnimationSerialization):
             if ret == QtWidgets.QMessageBox.StandardButton.Yes:
                 row = self.ui.actionListWidget.row(current)
                 self.groups = [group for group in self.groups if group is not current.anim_group]
+                # Copies retain their own sequences when their source is deleted.
+                # Detach the relationship so native saves cannot retain a dangling
+                # reference. The surrounding undo command restores both changes.
+                for item in self._get_action_list_items():
+                    if item.anim_group.copy_name == current.anim_group.name:
+                        item.anim_group.copy_name = ""
+                        item.anim_group.modified = True
+                        item.update_text()
                 taken = self.ui.actionListWidget.takeItem(row)
                 del taken
 
@@ -2240,7 +2200,8 @@ class AnimationEditor(AnimationSerialization):
         except ValueError:
             index_id = None
 
-        if self.groups and ok and name:
+        if ok and name.strip() and self.image_grid is not None:
+            name = name.strip()
             for group in self.groups:
                 if group.name == name:
                     self.ui.statusBar.showMessage(
@@ -2255,12 +2216,17 @@ class AnimationEditor(AnimationSerialization):
                     return
 
             if index_id is None:
-                index_id = self.groups[-1].idx + 1
+                index_id = max((group.idx for group in self.groups), default=-1) + 1
 
             group = AnimGroup(index_id, name)
             self.groups.append(group)
             item = AnimGroupItem(group, self)
             self.ui.actionListWidget.addItem(item)
+            self.ui.actionListWidget.setCurrentItem(item)
+            item.mouseClickEvent(None)
+            self.ui.statusBar.showMessage(
+                "Action created. Choose a direction and double-click sheet cells to add animation frames.", 8000
+            )
 
     def _notify_changes(self) -> None:
         """Set action as changed if an action has been modified."""
@@ -2426,16 +2392,31 @@ class AnimationEditor(AnimationSerialization):
         direction = (self.current_direction + step) % len(self.directionButtons)
         self.directionButtons[direction].click()
 
+    def choose_direction(self, direction: int) -> None:
+        """Apply a user direction choice to the resource controlling its facing."""
+        preview = self.point_preview
+        target = self
+        if preview is not None and self is not preview.root and preview.member(self).follow_facing:
+            target = preview.root
+        target.set_direction(direction)
+        target.directionButtons[direction].setChecked(True)
+        if preview is not None:
+            preview.advance(0)
+            preview.refresh()
+
     def set_direction(self, direction: int) -> None:
         if direction == self.current_direction:
-            self.directionButtons[direction].toggle()
+            self.directionButtons[direction].setChecked(True)
             return
 
         for button in self.directionButtons:
             if button != self.directionButtons[direction]:
                 button.setChecked(False)
 
+        row = self.ui.frameSlider.value() if self.ui.keepDirectionFrameCheckBox.isChecked() else 0
         self.current_direction = direction
+        playing = self.animating
+        pyglet.clock.unschedule(self._playing_animation)
 
         self.ui.animationFrameList.clear()
 
@@ -2447,14 +2428,27 @@ class AnimationEditor(AnimationSerialization):
 
                 if self.current_sequence.frames:
                     self.current_anim_frame = self.current_sequence.frames[0]
-
-                if not self.animating:
                     self.set_anim_frame_values(self.current_anim_frame)
+                else:
+                    self.clear_anim_frame()
+                    if self.sprite is not None:
+                        self.sprite.visible = False
+                        self.shadow.visible = False
 
                 if self.current_sequence:
                     self.set_sequence_list()
 
-                self.ui.animationFrameList.setCurrentRow(0)
+                if self.current_sequence.frames:
+                    row = min(row, len(self.current_sequence.frames) - 1)
+                    self.current_anim_frame = self.current_sequence.frames[row]
+                    with QtCore.QSignalBlocker(self.ui.frameSlider):
+                        self.ui.frameSlider.setValue(row)
+                    self.ui.animationFrameList.setCurrentRow(row)
+                    self.set_anim_frame_values(self.current_anim_frame)
+                    self.set_animation()
+                if playing and self.current_sequence.frames:
+                    pyglet.clock.schedule_once(self._playing_animation,
+                                               self.anim_speed * self.current_anim_frame.duration)
 
         self.updateBatchEditDialog()
 
@@ -2462,9 +2456,9 @@ class AnimationEditor(AnimationSerialization):
         """Clears information boxes of the Frame Data."""
         self.current_anim_frame = None
         self.displayed_anim_frame = None
-        if self.onionSprites:
+        if self.onionSprites or self.onion_shadow_sprites:
             self.openGLWidget.makeCurrent()
-        for sprite in self.onionSprites:
+        for sprite in (*self.onionSprites, *self.onion_shadow_sprites):
             sprite.visible = False
         self.syncActionPointControls(None)
 
@@ -2512,6 +2506,12 @@ class AnimationEditor(AnimationSerialization):
         self._update_anim_frame_widgets()
 
     def _update_anim_frame_widgets(self) -> None:
+        for index, frame in enumerate(self.current_sequence.frames):
+            frame.idx = index
+        for item in self._get_frame_list_items():
+            item.update_text()
+        if not self.current_sequence.frames:
+            self.clear_anim_frame()
         self.ui.frameSlider.setMaximum(max(0, len(self.current_sequence.frames) - 1))
         self.ui.frameSlider.setValue(0)
 
@@ -2565,22 +2565,13 @@ class AnimationEditor(AnimationSerialization):
             self.document_host.open_files_dialog()
             return
         file_name, _ = QFileDialog.getOpenFileName(
-            self.window, "Select Animation File", "", "Animation File (*.xml)"
+            self.window, "Select Sprite File", "", "Sprite Files (*.json *.xml)"
         )
         if file_name:
             self.load_animation(file_name)
 
-    def load_animation(self, file_name: str | PathLike[str]) -> bool:
-        try:
-            format_name = detect_format(ElementTree.parse(file_name).getroot())
-        except (OSError, ElementTree.ParseError) as error:
-            self.create_error_popup(str(error))
-            return False
-        loaded = (
-            self.load_sheet(file_name)
-            if format_name == SheetFormat.SINGLE
-            else self.import_multiple_sheets(file_name)
-        )
+    def load_animation(self, file_name: str | PathLike[str], *, add_to_recent: bool = True) -> bool:
+        loaded = self._load_sprite_document(file_name, add_to_recent=add_to_recent)
         if loaded and self.ui.actionListWidget.count():
             self.ui.actionListWidget.setCurrentRow(0)
             self.ui.actionListWidget.item(0).mouseClickEvent(None)
@@ -2590,13 +2581,19 @@ class AnimationEditor(AnimationSerialization):
         return self._load_sprite_document(file_name, SheetFormat.SINGLE)
 
     def _load_sprite_document(
-        self, file_name: str | PathLike[str], expected: SheetFormat
+        self, file_name: str | PathLike[str], expected: SheetFormat | SpriteFormat | None = None,
+        *, add_to_recent: bool = True,
     ) -> bool:
         try:
             document = SpriteDocument.load(file_name, expected)
-        except (FormatError, OSError, ElementTree.ParseError) as error:
+        except (FormatError, OSError, ValueError, ElementTree.ParseError) as error:
             self.create_error_popup(str(error))
             return False
+
+        return self._install_sprite_document(document, str(file_name), add_to_recent=add_to_recent)
+
+    def _install_sprite_document(self, document: SpriteDocument, file_name: str = "", *, add_to_recent: bool = True) -> bool:
+        """Install already loaded/validated sprite data without requiring files."""
 
         # Only replace the current document after the backend has loaded and
         # validated every source file. Graphics objects belong to this adapter.
@@ -2623,10 +2620,18 @@ class AnimationEditor(AnimationSerialization):
         )
         self.cell_edit_revision = document.cell_edit_revision
         self.loaded_tree = document.source_tree
-        self.sheet_format = document.sheet_format
-        modeName = "Single" if document.sheet_format == SheetFormat.SINGLE else "Multi"
+        self.sheet_format = document.sheet_format or SheetFormat.NATIVE
+        self.texture_name = document.texture_name
+        self.action_point_names = document.action_point_names
+        self.rig_profile = document.rig_profile
+        self.rig_profile_id = document.rig_profile_id
+        self.refreshRigProfile(force=True)
+        format_labels: dict[SheetFormat | str, str] = {
+            SheetFormat.NATIVE: "JSON", SheetFormat.SINGLE: "Single", SheetFormat.MULTI: "Multi",
+        }
+        modeName = format_labels.get(self.sheet_format, str(self.sheet_format))
         self.ui.groupBox_5.setTitle(f"Sprite Sheet ({modeName})")
-        self.single_loaded = document.sheet_format == SheetFormat.SINGLE
+        self.single_loaded = self.sheet_format != SheetFormat.MULTI
         self.shadow_size = document.shadow_size
         self.shadow_size_present = document.shadow_size_present
         self.loaded_shadow_size = document.loaded_shadow_size
@@ -2644,12 +2649,15 @@ class AnimationEditor(AnimationSerialization):
         self._add_frames_from_grid()
         for group in self.groups:
             self.ui.actionListWidget.addItem(AnimGroupItem(group, self))
-        self.add_recent_list(file_name)
+        if file_name and add_to_recent:
+            self.add_recent_list(file_name)
         self.trackArtwork()
         self.savedEditSignature = SpriteEditorWindow._document_state(self)
         self.ui.statusBar.showMessage(
             "Frame data and images loaded successfully.", 3000
         )
+        if self.workspace:
+            self.workspace.reset()
         return True
 
     @undoable("Add Frame")
@@ -2657,7 +2665,7 @@ class AnimationEditor(AnimationSerialization):
         """Create new animation frame in the sequence. Adds to the end."""
         if self.current_sequence:
             anim_idx = len(self.current_sequence.frames)
-            anim_frame = AnimFrame(anim_idx, frame_idx)
+            anim_frame = AnimFrame(anim_idx, frame_idx, duration=max(1, self.ui.durationSpinBox.value()))
 
             self._add_anim_frame(anim_frame)
 
@@ -2672,6 +2680,10 @@ class AnimationEditor(AnimationSerialization):
         self.ui.animationFrameList.addItem(item)
 
         self._update_anim_frame_widgets()
+        self.current_anim_frame = anim_frame
+        self.ui.animationFrameList.setCurrentItem(item)
+        self.set_anim_frame_values(anim_frame)
+        self.set_animation()
 
     @staticmethod
     def adjust_offset(
@@ -2691,8 +2703,6 @@ class AnimationEditor(AnimationSerialization):
             image: pyglet.image.ImageDataRegion
             image.anchor_x = image.width // 2
             image.anchor_y = image.height // 2
-            if self.action_points and idx not in self.action_points:
-                continue
             item = LoadedSheetFrame(
                 f"Frame {idx}", idx, image, self.ui.sheetFramePicture, self
             )
@@ -2714,6 +2724,7 @@ class AnimationEditor(AnimationSerialization):
         """Clear everything so we can load a new sprite."""
         self.ui.sheetFramePicture.finishDrag(True)
         self.clearOnionPreview()
+        self.clearPointPreview()
         self.undoStack.clear()
         self.savedEditSignature = None
         self.ui.groupBox_5.setTitle("Sprite Sheet")
@@ -2723,6 +2734,9 @@ class AnimationEditor(AnimationSerialization):
         self.updateArtworkWatch()
         self.sheet_preview_images.clear()
         self.single_loaded = None
+        self.sheet_format = None
+        self.loaded_tree = None
+        self.source_image_path = None
         self.sheet_image = None
         self.action_pt_image = None
         self.image_grid: TopLeftGrid | None = None
@@ -2783,14 +2797,11 @@ class AnimationEditor(AnimationSerialization):
         anim_frame = anim_frame or self.current_anim_frame
         ap = self.action_points[anim_frame.frame_index]
 
-        if not anim_frame.flip:
-            lh_pos, c_pos, rh_pos, head_pos = ap.all_pos()
-        else:
+        points = [point for _, point in ap.items()]
+        if anim_frame.flip:
             width = self.image_grid[anim_frame.frame_index].width
             pivot = width - 1 - 2 * (width // 2)
-            lh_pos, c_pos, rh_pos, head_pos = [
-                Offset(pivot - point.x, point.y) for point in ap.all_pos()
-            ]
+            points = [Offset(pivot - point.x, point.y) for point in points]
 
         return tuple(
             (
@@ -2800,8 +2811,33 @@ class AnimationEditor(AnimationSerialization):
                 - (anim_frame.sprite_offset.y + point.y) * self.scale,
                 0,
             )
-            for point in (lh_pos, c_pos, rh_pos, head_pos)
+            for point in points
         )
+
+    @staticmethod
+    def actionPointColor(name):
+        return {"left_hand": (255, 0, 0), "center": (0, 255, 0),
+                "right_hand": (0, 0, 255), "head": (0, 0, 0),
+                "shadow_point": (255, 255, 255)}.get(name, (255, 180, 0))
+
+    def actionPointMarker(self, name):
+        color = self.actionPointColor(name)
+        size = 2 * self.ui.actionPointsSizeSlider.value() + 1
+        key = (size, color)
+        if key not in self._action_point_markers:
+            image = create_point_marker(size, (*color, 255))
+            image.anchor_x = image.anchor_y = size // 2
+            self._action_point_markers[key] = image
+        return self._action_point_markers[key]
+
+    def changeActionPointSize(self, size):
+        self.ui.actionPointsSizeLabel.setText(str(size))
+        self.ui.sheetFramePicture.pointMarkerSize = size
+        self.ui.sheetFramePicture.update()
+        if self.sprite is not None:
+            self.openGLWidget.makeCurrent()
+            self.updateActionPointPreview(self.displayed_anim_frame or self.current_anim_frame)
+        self.openGLWidget.update()
 
     def updateActionPointPreview(self, anim_frame: AnimFrame | None) -> None:
         if self.sprite is None or anim_frame is None:
@@ -2809,30 +2845,31 @@ class AnimationEditor(AnimationSerialization):
         positions = (
             self.get_action_point_positions(anim_frame)
             if anim_frame.frame_index in self.action_points
-            else (None,) * 4
+            else ()
         )
         shadow_position = (
             self.openGLWidget.width() // 2 + anim_frame.shadow_offset.x * self.scale,
             self.openGLWidget.height() // 3 - anim_frame.shadow_offset.y * self.scale,
             0,
         )
-        for name, color, position in zip(
-            ("left_hand", "center", "right_hand", "head", "shadow_point"),
-            ((255, 0, 0), (0, 255, 0), (0, 0, 255), (0, 0, 0), (255, 255, 255)),
-            (*positions, shadow_position),
-        ):
-            marker = getattr(self, name)
-            if marker is None and position is not None:
+        body = self.action_points.get(anim_frame.frame_index)
+        names = [name for name, _ in body.items()] if body else []
+        names.append("shadow_point")
+        for index, (name, position) in enumerate(zip(names, (*positions, shadow_position))):
+            image = self.actionPointMarker(name)
+            marker = self.ap_sprites[index] if index < len(self.ap_sprites) else None
+            if marker is None:
                 marker = pyglet.sprite.Sprite(
-                    self.action_point_marker,
+                    image,
                     batch=self.openGLWidget.batch,
-                    group=pyglet.graphics.Group(4 if name == "center" else 3),
+                    group=pyglet.graphics.Group(10000 if name == "center" else 9999),
                 )
-                marker.color = color
                 marker.scale = self.scale
                 marker.opacity = self.ui.actionPointsOpacitySlider.value()
-                setattr(self, name, marker)
                 self.ap_sprites.append(marker)
+            marker.image = image
+            if name in ("left_hand", "center", "right_hand", "head", "shadow_point"):
+                setattr(self, name, marker)
             if marker is not None:
                 if position is not None:
                     marker.position = position
@@ -2840,6 +2877,8 @@ class AnimationEditor(AnimationSerialization):
                     position is not None
                     and self.ui.showActionPointsCheckBox.isChecked()
                 )
+        for marker in self.ap_sprites[len(names):]:
+            marker.visible = False
 
     def setOnionPreviewEnabled(self, enabled: bool) -> None:
         self.onionPreviewEnabled = enabled
@@ -2850,9 +2889,23 @@ class AnimationEditor(AnimationSerialization):
 
     def changeOnionPreview(self, enabled: bool) -> None:
         self.settings.setValue("preferences/onionPreview", enabled)
-        editors = self.document_host._editors.values() if self.document_host else (self,)
+        editors = self.document_host.preview_editors() if self.document_host else (self,)
         for editor in editors:
             editor.setOnionPreviewEnabled(enabled)
+        self.settings.sync()
+
+    def set_onion_shadows_enabled(self, enabled: bool) -> None:
+        self.onion_shadows_enabled = enabled
+        with QtCore.QSignalBlocker(self.ui.onionShadowsCheckBox):
+            self.ui.onionShadowsCheckBox.setChecked(enabled)
+        self.updateOnionPreview(self.displayed_anim_frame or self.current_anim_frame)
+        self.openGLWidget.update()
+
+    def change_onion_shadows(self, enabled: bool) -> None:
+        self.settings.setValue("preferences/onionShadows", enabled)
+        editors = self.document_host.preview_editors() if self.document_host else (self,)
+        for editor in editors:
+            editor.set_onion_shadows_enabled(enabled)
         self.settings.sync()
 
     def setOnionRange(self, lower: int, upper: int) -> None:
@@ -2867,7 +2920,7 @@ class AnimationEditor(AnimationSerialization):
     def changeOnionRange(self, lower: int, upper: int) -> None:
         self.settings.setValue("preferences/onionPreviousFrames", -lower)
         self.settings.setValue("preferences/onionNextFrames", upper)
-        editors = self.document_host._editors.values() if self.document_host else (self,)
+        editors = self.document_host.preview_editors() if self.document_host else (self,)
         for editor in editors:
             editor.setOnionRange(lower, upper)
         self.settings.sync()
@@ -2882,17 +2935,18 @@ class AnimationEditor(AnimationSerialization):
 
     def changeOnionOpacity(self, opacity: int) -> None:
         self.settings.setValue("preferences/onionOpacity", opacity)
-        editors = self.document_host._editors.values() if self.document_host else (self,)
+        editors = self.document_host.preview_editors() if self.document_host else (self,)
         for editor in editors:
             editor.setOnionOpacity(opacity)
         self.settings.sync()
 
     def clearOnionPreview(self) -> None:
-        if self.onionSprites:
+        if self.onionSprites or self.onion_shadow_sprites:
             self.openGLWidget.makeCurrent()
-            for sprite in self.onionSprites:
+            for sprite in (*self.onionSprites, *self.onion_shadow_sprites):
                 sprite.delete()
             self.onionSprites.clear()
+            self.onion_shadow_sprites.clear()
 
     def onionPreviewNeighbors(self, frame: AnimFrame | None) -> list[tuple[AnimFrame, int]]:
         if not self.onionPreviewEnabled or self.current_sequence is None:
@@ -2939,8 +2993,26 @@ class AnimationEditor(AnimationSerialization):
             sprite.visible = True
         for sprite in self.onionSprites[len(neighbors):]:
             sprite.visible = False
+        shadow_neighbors = neighbors if self.onion_shadows_enabled else []
+        for index, (neighbor, distance) in enumerate(shadow_neighbors):
+            image = self._display_shadow_image()
+            if index == len(self.onion_shadow_sprites):
+                self.onion_shadow_sprites.append(pyglet.sprite.Sprite(
+                    image, batch=self.openGLWidget.batch, group=pyglet.graphics.Group(-1)
+                ))
+            sprite = self.onion_shadow_sprites[index]
+            sprite.image = image
+            sprite.position = self.get_shadow_position(neighbor)
+            sprite.scale = self.scale
+            sprite.opacity = round(self.onionOpacity / distance)
+            sprite.visible = True
+        for sprite in self.onion_shadow_sprites[len(shadow_neighbors):]:
+            sprite.visible = False
 
     def _playing_animation(self, dt: float) -> None:
+        if self.current_anim_frame is None or self.current_sequence is None or not self.current_sequence.frames:
+            self.animating = False
+            return
         self.openGLWidget.makeCurrent()
 
         self._set_anim_frame_display(self.current_anim_frame)
@@ -2969,6 +3041,9 @@ class AnimationEditor(AnimationSerialization):
         self.ui.playButton.setPlaying(self._animating)
 
     def play_animation(self) -> None:
+        if getattr(self, "point_preview", None) is not None:
+            self.point_preview.toggle(self)
+            return
         if self.current_anim_frame:
             self.animating = not self.animating
             pyglet.clock.unschedule(self._playing_animation)
@@ -2991,8 +3066,10 @@ class AnimationEditor(AnimationSerialization):
         if self.current_anim_group:
             if self.current_anim_group.directions[self.current_direction].frames:
                 if not self.sprite:
-                    sprite_pos = self.get_sprite_position()
-                    shadow_pos = self.get_shadow_position()
+                    first_frame = self.current_anim_group.directions[self.current_direction].frames[0]
+                    frame = self.current_anim_frame or first_frame
+                    sprite_pos = self.get_sprite_position(frame)
+                    shadow_pos = self.get_shadow_position(frame)
 
                     first_idx = (
                         self.current_anim_group.directions[self.current_direction]
@@ -3021,6 +3098,8 @@ class AnimationEditor(AnimationSerialization):
                     self.sprite.opacity = self.ui.spriteOpacitySlider.value()
 
                 if self.sprite:
+                    self.sprite.visible = True
+                    self.shadow.visible = True
                     anim_frame = (
                         self.current_anim_frame
                         if self.current_anim_frame is not None
@@ -3052,7 +3131,7 @@ class AnimationEditor(AnimationSerialization):
         return self._load_sprite_document(file_name, SheetFormat.MULTI)
 
     def export_single_sheet(self) -> None:
-        if self.loaded_tree:
+        if self.sheet_format is not None:
             options = QFileDialog.Option.ShowDirsOnly
 
             directory = QFileDialog.getExistingDirectory(
@@ -3088,6 +3167,8 @@ class AnimationEditor(AnimationSerialization):
             loaded_shadow_size=self.loaded_shadow_size,
             loaded_action_points=self.loaded_action_points,
             cell_edit_revision=self.cell_edit_revision,
+            action_point_names=self.action_point_names, rig_profile=self.rig_profile,
+            rig_profile_id=self.rig_profile_id,
             trim_copies=self.ui.actionTrim_Copies.isChecked(),
             collapse_singles=self.ui.actionCollapse_Singles.isChecked(),
         )
@@ -3095,24 +3176,28 @@ class AnimationEditor(AnimationSerialization):
     def _export_bundle(
         self,
         directory: str | PathLike[str],
-        format_name: SheetFormat,
+        format_name: SheetFormat | SpriteFormat,
         xml_name: str | None = None,
     ) -> bool:
+        if self.frozen_preview:
+            return False
         try:
-            if not self.groups or self.image_grid is None:
+            if self.image_grid is None:
                 raise FormatError("No sprite data to save.")
-            self._sprite_document().export(directory, format_name, xml_name)
+            self._sprite_document().export(directory, format_name, filename=xml_name)
         except (FormatError, OSError, ValueError) as error:
             self.create_error_popup(str(error))
             return False
         message = (
+            "Sprite bundle" if isinstance(format_name, SpriteFormat) else
+            "Sprite document" if format_name == SheetFormat.NATIVE else
             "Single sheet" if format_name == SheetFormat.SINGLE else "Multisheet frames"
         )
         self.ui.statusBar.showMessage(f"{message} were output successfully.", 3000)
         return True
 
     def export_multiple_sheets(self) -> None:
-        if self.loaded_tree:
+        if self.sheet_format is not None:
             options = QFileDialog.Option.ShowDirsOnly
 
             directory = QFileDialog.getExistingDirectory(
@@ -3144,6 +3229,12 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         )
         self.settings = QSettings("MDFrameEditor", "Frame Editor")
         self.panelStates: dict[str, QtCore.QByteArray] = {}
+        self.project_path: pathlib.Path | None = None
+        self.project_profile = None
+        self.project_restore_error = ""
+        self.maximizedLayoutTimer = QtCore.QTimer(self)
+        self.maximizedLayoutTimer.setSingleShot(True)
+        self.maximizedLayoutTimer.timeout.connect(self.fit_maximized_layout)
         for name in ("mainSplitter", "previewSplitter"):
             state = self.settings.value(f"window/{name}")
             if isinstance(state, QtCore.QByteArray):
@@ -3152,8 +3243,13 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         self._holders: dict[QtWidgets.QWidget, QtWidgets.QMainWindow] = {}
         self._saved_states: dict[QtWidgets.QWidget, tuple[object, ...]] = {}
         self._active_editor: AnimationEditor | None = None
+        self._linked_source_errors = {}
+        self.linkedSourceTimer = QtCore.QTimer(self)
+        self.linkedSourceTimer.setInterval(500)
+        self.linkedSourceTimer.timeout.connect(self.refresh_rig_profiles)
+        self.linkedSourceTimer.start()
         self.animationSettingsClipboard: AnimGroup | None = None
-        self.actionPointsClipboard: ActionPoints | None = None
+        self.actionPointsClipboard: ActionPoints | CopiedActionPoint | None = None
         self.batchEditDialog: BatchEditDialog | None = None
         self.documentTabs = QtWidgets.QTabWidget(self)
         self.documentTabs.setObjectName("documentTabs")
@@ -3169,6 +3265,11 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
             lambda: self.close_document(self.documentTabs.currentIndex())
         )
         self.addAction(self.closeTabAction)
+        self.newAction = QtGui.QAction("New…", self)
+        self.newAction.setShortcut(QtGui.QKeySequence.StandardKey.New)
+        self.newAction.triggered.connect(self.new_from_image_dialog)
+        self.addAction(self.newAction)
+        self._create_project_menu()
         self._createPreferenceMenus()
         self.documentTabs.currentChanged.connect(self._activate_document)
         self.documentTabs.tabCloseRequested.connect(self.close_document)
@@ -3181,6 +3282,75 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
             self.restoreGeometry(geometry)
         # Apply saved dividers after Qt allocates the restored window's layout.
         QtCore.QTimer.singleShot(0, self._restoreVisiblePanelLayout)
+        self._restore_last_project()
+
+    def _create_project_menu(self) -> None:
+        self.projectMenu = QtWidgets.QMenu("Project", self)
+        self.openProjectAction = self.projectMenu.addAction("Open Project…", self.open_project_dialog)
+        self.closeProjectAction = self.projectMenu.addAction("Close Project", self.close_project)
+        self.projectMenu.addSeparator()
+        self.currentProjectAction = self.projectMenu.addAction("No project loaded")
+        self.currentProjectAction.setEnabled(False)
+        self._update_project_menu()
+
+    def _update_project_menu(self) -> None:
+        self.closeProjectAction.setEnabled(
+            self.project_path is not None or self.settings.contains("project/lastPath")
+        )
+        if self.project_path is not None:
+            self.currentProjectAction.setText(self.project_path.name)
+            self.currentProjectAction.setToolTip(str(self.project_path))
+        else:
+            self.currentProjectAction.setText("Project unavailable" if self.project_restore_error else "No project loaded")
+            self.currentProjectAction.setToolTip(self.project_restore_error)
+
+    def open_project_dialog(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Project", str(self.project_path or self.settings.value("project/lastPath", "", str)),
+            "Project Profiles (*.yaml *.yml)",
+        )
+        if path:
+            self.open_project(path)
+
+    def open_project(self, path: str | PathLike[str], *, restoring: bool = False) -> bool:
+        from project import load_profile
+        try:
+            project_path = pathlib.Path(path).resolve()
+            profile = load_profile(project_path)
+        except (FormatError, OSError, ValueError) as error:
+            if restoring:
+                self.project_restore_error = f"Could not restore project {path}: {error}"
+                self.statusBar().showMessage(self.project_restore_error, 15000)
+                self._update_project_menu()
+            else:
+                self.current_editor.create_error_popup(str(error))
+            return False
+        self.project_path = project_path
+        self.project_profile = profile
+        self.project_restore_error = ""
+        self.settings.setValue("project/lastPath", str(project_path))
+        self.settings.sync()
+        self._update_project_menu()
+        for editor in self.preview_editors():
+            editor.refresh_project_rig_selector()
+        self.statusBar().showMessage(f"Project loaded: {project_path}", 10000)
+        return True
+
+    def _restore_last_project(self) -> None:
+        path = self.settings.value("project/lastPath", "", str)
+        if path:
+            self.open_project(path, restoring=True)
+
+    def close_project(self) -> None:
+        self.project_path = None
+        self.project_profile = None
+        self.project_restore_error = ""
+        self.settings.remove("project/lastPath")
+        self.settings.sync()
+        self._update_project_menu()
+        for editor in self.preview_editors():
+            editor.refresh_project_rig_selector()
+        self.statusBar().showMessage("Project closed", 5000)
 
     def _createPreferenceMenus(self) -> None:
         self.settingsMenu = QtWidgets.QMenu("Settings", self)
@@ -3197,7 +3367,11 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
             ),
             ("showSpriteBounds", "Show Sprite Dimensions", False, self.viewMenu),
             ("includeWhitespace", "Include Sprite Whitespace", False, self.viewMenu),
+            ("showOnionControls", "Show Onion Skinning", True, self.viewMenu),
+            ("viewLayers", "View Layers", False, self.viewMenu),
         ):
+            if name == "showOnionControls":
+                menu.addSeparator()
             action = QtGui.QAction(text, self)
             action.setCheckable(True)
             action.setChecked(self.settings.value(f"preferences/{name}", default, bool))
@@ -3247,27 +3421,70 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
             self.preferenceActions["cameraLocked"].isChecked()
         )
         editor.setOnionPreviewEnabled(self.settings.value("preferences/onionPreview", False, bool))
+        editor.set_onion_shadows_enabled(self.settings.value("preferences/onionShadows", False, bool))
+        editor.ui.onionPreviewGroupBox.setVisible(
+            self.preferenceActions["showOnionControls"].isChecked()
+        )
+        if editor.workspace:
+            editor.workspace.set_visible(self.preferenceActions["viewLayers"].isChecked())
+
+    def preview_editors(self):
+        for editor in self._editors.values():
+            yield editor
 
     def updateArtworkReloadAction(self) -> None:
         """Enable the reload preference only for an active single-sheet document."""
         editor = self.current_editor
         self.preferenceActions["autoReloadArtwork"].setEnabled(
-            editor is not None and editor.sheet_format == SheetFormat.SINGLE
+            editor is not None and editor.sheet_format in (SheetFormat.SINGLE, SheetFormat.NATIVE)
         )
 
     def _restoreVisiblePanelLayout(self) -> None:
         editor = self.current_editor
         if editor is not None:
-            editor.ui.updateEditorLayout()
+            subject = editor.workspace.active_editor if editor.workspace else editor
+            subject.ui.updateEditorLayout()
             self._restorePanelLayout(editor)
 
     def _capturePanelLayout(self, editor: AnimationEditor) -> None:
+        if editor.workspace:
+            editor = editor.workspace.active_editor
         for name in ("mainSplitter", "previewSplitter"):
             self.panelStates[name] = getattr(editor.ui, name).saveState()
 
     def _restorePanelLayout(self, editor: AnimationEditor) -> None:
+        if editor.workspace:
+            editor = editor.workspace.active_editor
         for name, state in self.panelStates.items():
             getattr(editor.ui, name).restoreState(state)
+
+    def set_control_group_collapsed(self, name: str, collapsed: bool) -> None:
+        self.settings.setValue(f"window/collapsed/{name}", collapsed)
+        for editor in self._editors.values():
+            group = editor.ui.collapsible_groups[name]
+            if group.is_collapsed() != collapsed:
+                with QtCore.QSignalBlocker(group):
+                    group.set_collapsed(collapsed)
+                editor.ui.control_group_collapsed(name, collapsed)
+            editor.ui.editorLayoutTimer.start(0)
+        self.settings.sync()
+
+    def fit_maximized_layout(self) -> None:
+        """Recover the monitor bounds after an expanded layout enlarged the window."""
+        handle = self.windowHandle()
+        if (sys.platform != "win32" or not self.isVisible() or not self.isMaximized()
+                or handle is None or self.screen() is None):
+            return
+        available = self.screen().availableGeometry()
+        margins = handle.frameMargins()
+        target = available.adjusted(margins.left(), margins.top(),
+                                    -margins.right(), -margins.bottom())
+        target.setWidth(max(target.width(), self.minimumWidth()))
+        target.setHeight(max(target.height(), self.minimumHeight()))
+        if handle.geometry() != target:
+            # QWidget.resize/setGeometry clears the maximized state. QWindow's
+            # geometry keeps it while undoing growth beyond the desktop.
+            handle.setGeometry(target)
 
     def _saveWindowLayout(self) -> None:
         if self.current_editor is not None:
@@ -3316,14 +3533,20 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
             for group in editor.groups
         )
         points = tuple(
-            (index, tuple(point.data() for point in body.all_pos()))
+            (index, body.signature())
             for index, body in sorted(editor.action_points.items())
         )
         return (
             editor.shadow_size, editor.shadow_size_present, groups, points,
             editor.frame_width, editor.frame_height,
             editor.cell_edit_revision,
+            tuple(editor.action_point_names), str(editor.rig_profile or ""),
+            editor.rig_profile_id,
         )
+
+    def refresh_rig_profiles(self):
+        for editor in self.preview_editors():
+            editor.refreshRigProfile()
 
     def _create_document(self) -> tuple[QtWidgets.QWidget, AnimationEditor]:
         # Reuse the editor UI without embedding a second menu/status bar in a tab.
@@ -3331,12 +3554,20 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         holder.hide()
         ui = Ui_MainWindow()
         ui.setupUi(holder)
+        ui.collapseLayoutTimer.timeout.connect(lambda: self.maximizedLayoutTimer.start(0))
+        ui.editorLayoutTimer.timeout.connect(lambda: self.maximizedLayoutTimer.start(0))
         page = holder.takeCentralWidget()
         editor = AnimationEditor(self.app, self, ui, document_host=self)
+        for name, group in ui.collapsible_groups.items():
+            group.set_collapsed(self.settings.value(f"window/collapsed/{name}", False, bool))
+            group.collapsed_changed.connect(partial(self.set_control_group_collapsed, name))
+        editor.workspace = LayerWorkspace(editor, page, holder, AnimationEditor)
+        page = editor.workspace.widget
         self._applyPreviewPreferences(editor)
         self._restorePanelLayout(editor)
         editor.openGLWidget.timer.stop()
         ui.menuFile.insertAction(ui.actionExit, self.closeTabAction)
+        ui.menuFile.insertAction(ui.actionLoad, self.newAction)
         ui.statusBar.messageChanged.connect(
             lambda message, document=editor: self._document_status(document, message)
         )
@@ -3350,11 +3581,121 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         self.documentTabs.setCurrentWidget(page)
         return editor
 
+    def create_frozen_document(self, document: SpriteDocument, name: str, *, source_label: str = "", saved_name: bool = False) -> AnimationEditor:
+        """Install an independent, fileless comparison with no authoring or reloads."""
+        import re
+        from uuid import uuid4
+        used = {self.documentTabs.tabText(i).casefold() for i in range(self.documentTabs.count())}
+        legacy = re.fullmatch(r"(.*) \((?:Snapshot|Frozen)\)(?: \((\d+)\))?", name) if saved_name else None
+        if legacy:
+            base = legacy[1]
+            suffix = int(legacy[2]) + 1 if legacy[2] else 1
+            name = base + " " + "^" * suffix
+        elif saved_name:
+            base = name.rstrip("^").rstrip()
+            suffix = len(name) - len(name.rstrip("^"))
+        else:
+            base, suffix = name, 1
+            name = base + " ^"
+        while name.casefold() in used:
+            suffix += 1
+            name = base + " " + "^" * suffix
+        page, editor = self._create_document()
+        try:
+            editor._install_sprite_document(copy.deepcopy(document), add_to_recent=False)
+            if editor.groups:
+                editor.ui.actionListWidget.setCurrentRow(0)
+                editor.ui.actionListWidget.item(0).mouseClickEvent(None)
+            editor.frozen_preview = True
+            editor.refreshNamedPointControls()
+            editor.frozen_snapshot_id = uuid4().hex
+            editor.frozen_origin_label = source_label
+            editor.untitled_name = name
+            editor.setArtworkReloadEnabled(False)
+            # Keep point selection and display controls available for inspection.
+            # Point/rig editors also enforce read-only state when refreshed.
+            for widget in (editor.ui.pointDefinedCheckBox, *editor.ui.namedPointSpinBoxes,
+                           *(spin for spins in editor.ui.actionPointSpinBoxes.values() for spin in spins),
+                           editor.ui.groupBox_7,
+                           editor.ui.frameDataPanel, editor.ui.shadowSizeComboBox,
+                           editor.ui.sheetFramePicture, editor.ui.actionAddButton,
+                           editor.ui.actionDuplicateButton, editor.ui.actionDeleteButton,
+                           editor.ui.pasteSequenceButton, editor.ui.hitPointButton,
+                           editor.ui.returnPointButton, editor.ui.rushPointButton,
+                           *editor.ui.sequenceButtonWidgets):
+                widget.setEnabled(False)
+            editor.editMenu.setEnabled(False)
+            for action in (editor.ui.actionSave, editor.ui.actionSave_As,
+                           editor.ui.actionExportAll_Animations, editor.ui.actionExportSingle_Animation):
+                action.setEnabled(False)
+            self._saved_states[page] = self._document_state(editor)
+            self.documentTabs.addTab(page, name)
+            self.documentTabs.setCurrentWidget(page)
+            self._update_tab(page)
+            return editor
+        except Exception:
+            self._dispose_document(page)
+            raise
+
     def open_files_dialog(self) -> list[AnimationEditor]:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Open Sprites", "", "Animation Files (*.xml)"
+            self, "Open Sprites and Previews", "", "Sprites and Previews (*.json *.xml *.mdpreview);;Sprite Files (*.json *.xml);;Editor Previews (*.mdpreview)"
         )
         return self.open_files(paths)
+
+    def new_from_image_dialog(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Choose Image for New Sprite", "", IMAGE_FILTER)
+        if path:
+            self.open_file(path)
+
+    def open_image(self, path: str, *, add_to_recent: bool = True) -> AnimationEditor | None:
+
+        try:
+            with Image.open(path) as source:
+                if getattr(source, "n_frames", 1) != 1:
+                    raise FormatError("Open a single-frame image containing the atlas cells.")
+                image = source.convert("RGBA")
+            dialog = ImageAtlasDialog(image, self,
+                cell_width=self.settings.value("imageImport/cellWidth", 32, int),
+                cell_height=self.settings.value("imageImport/cellHeight", 32, int))
+            try:
+                if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+                    return None
+                document = dialog.document
+            finally:
+                dialog.deleteLater()
+        except (FormatError, OSError, ValueError) as error:
+            self.current_editor.create_error_popup(str(error))
+            return None
+        page = self.documentTabs.currentWidget()
+        editor = self.current_editor
+        if editor is None or editor.sheet_format is not None:
+            page, editor = self._create_document()
+        editor._install_sprite_document(document)
+        editor.source_image_path = pathlib.Path(path)
+        editor.ui.actionListWidget.setCurrentRow(0)
+        editor.ui.actionListWidget.item(0).mouseClickEvent(None)
+        editor.selectSheetFrame(0)
+        base = f"{pathlib.Path(path).stem} (unsaved)"
+        used = {self.documentTabs.tabText(i) for i in range(self.documentTabs.count()) if self.documentTabs.widget(i) is not page}
+        name, suffix = base, 1
+        while name in used:
+            name = f"{base} ({suffix})"
+            suffix += 1
+        editor.untitled_name = name
+        self._saved_states[page] = self._document_state(editor)
+        if self.documentTabs.indexOf(page) < 0:
+            self.documentTabs.addTab(page, "")
+        self.documentTabs.setCurrentWidget(page)
+        self._update_tab(page)
+        self.updateArtworkReloadAction()
+        self.updateInfoAction()
+        self.settings.setValue("imageImport/cellWidth", document.frame_width)
+        self.settings.setValue("imageImport/cellHeight", document.frame_height)
+        if add_to_recent:
+            editor.add_recent_list(path)
+        editor.ui.statusBar.showMessage("Sprite created with a Default action. Choose a direction and double-click sheet cells to build its animation. Use + to add more actions. Save to create JSON and PNG files.", 15000)
+        return editor
 
     def open_files(self, paths: Iterable[str | PathLike[str]]) -> list[AnimationEditor]:
         opened = []
@@ -3364,21 +3705,34 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
                 opened.append(editor)
         return opened
 
-    def open_file(self, path: str | PathLike[str]) -> AnimationEditor | None:
+    def open_file(self, path: str | PathLike[str], *, add_to_recent: bool = True) -> AnimationEditor | None:
         path = str(pathlib.Path(path).resolve())
+        if is_preview_path(path):
+            from gui.point_preview import load_preview
+            try:
+                return load_preview(self, path, add_to_recent=add_to_recent).root
+            except (FormatError, OSError, ValueError) as error:
+                self.current_editor.create_error_popup(str(error))
+                return None
         for page, editor in self._editors.items():
             if editor.file_name and self._path_key(editor.file_name) == self._path_key(
                 path
             ):
                 self.documentTabs.setCurrentWidget(page)
                 return editor
+            if (not editor.file_name and getattr(editor, "source_image_path", None) is not None
+                    and self._path_key(editor.source_image_path) == self._path_key(path)):
+                self.documentTabs.setCurrentWidget(page)
+                return editor
+        if pathlib.Path(path).suffix.lower() in IMAGE_SUFFIXES:
+            return self.open_image(path, add_to_recent=add_to_recent)
         page = self.documentTabs.currentWidget()
         editor = self.current_editor
-        reuse_empty = editor is not None and editor.loaded_tree is None
+        reuse_empty = editor is not None and editor.sheet_format is None
         if not reuse_empty:
             page, editor = self._create_document()
         try:
-            loaded = editor.load_animation(path)
+            loaded = editor.load_animation(path, add_to_recent=add_to_recent)
         except Exception:
             if not reuse_empty:
                 self._dispose_document(page)
@@ -3401,6 +3755,13 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         editor = self._editors[page]
         index = self.documentTabs.indexOf(page)
         if index >= 0:
+            if not editor.file_name:
+                self.documentTabs.setTabText(index, getattr(editor, "untitled_name", "Untitled"))
+                self.documentTabs.setTabToolTip(index, ("Snapshot (read-only): " + editor.frozen_origin_label)
+                                               if editor.frozen_preview else "Unsaved sprite")
+                if editor is self.current_editor:
+                    self._update_window_title()
+                return
             folder = pathlib.Path(editor.file_name).parent
             base = folder.name or str(folder)
             previous_path = self.documentTabs.tabToolTip(index)
@@ -3433,7 +3794,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         editor = self.current_editor
         name = (
             self.documentTabs.tabText(self.documentTabs.currentIndex())
-            if editor and editor.file_name
+            if editor and editor.sheet_format is not None
             else ""
         )
         title = f"MD Frame Editor ({VERSION})"
@@ -3452,14 +3813,18 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         editor = self.current_editor
         self._active_editor = editor
         if self.batchEditDialog is not None:
-            self.batchEditDialog.setEditor(editor)
+            self.batchEditDialog.setEditor(editor.workspace.active_editor if editor and editor.workspace else editor)
         if editor is not None:
             editor.undoAction.setShortcuts(QtGui.QKeySequence.StandardKey.Undo)
             editor.redoAction.setShortcuts(QtGui.QKeySequence.StandardKey.Redo)
             self._restorePanelLayout(editor)
-            for menu in (editor.ui.menuFile, editor.editMenu):
+            if editor.point_preview is not None:
+                editor.point_preview.refresh()
+            subject = editor.workspace.active_editor if editor.workspace else editor
+            for menu in (editor.ui.menuFile, subject.editMenu):
                 self.menuBar().addAction(menu.menuAction())
             self.menuBar().addMenu(self.viewMenu)
+            self.menuBar().addMenu(self.projectMenu)
             self.menuBar().addMenu(self.settingsMenu)
             editor.openGLWidget.timer.start()
             if editor.animating and editor.current_anim_frame is not None:
@@ -3478,10 +3843,11 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
 
     def refresh_recent_files(self) -> None:
         for editor in self._editors.values():
-            editor.recent_files = editor.settings.value("recent", [], list)
+            editor._read_recent_files()
             editor._update_recent_actions()
 
     def can_save_path(self, editor: AnimationEditor, path: str | PathLike[str]) -> bool:
+        target = pathlib.Path(path)
         for other in self._editors.values():
             if (
                 other is not editor
@@ -3493,23 +3859,35 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         return True
 
     def document_saved(self, editor: AnimationEditor) -> None:
+        if editor.point_preview is not None:
+            editor.point_preview.source_saved(editor)
+        self.updateArtworkReloadAction()
         for page, document in self._editors.items():
             if document is editor:
                 self._saved_states[page] = self._document_state(editor)
                 self._update_tab(page)
                 break
 
+
+    def spriteContentChanged(self, editor: AnimationEditor) -> bool:
+        if editor.frozen_preview:
+            return False
+        page = next(page for page, other in self._editors.items() if other is editor)
+        return self._saved_states[page] != self._document_state(editor)
+
     def _confirm_close(self, page: QtWidgets.QWidget) -> bool:
         editor = self._editors[page]
-        if editor.loaded_tree is None or self._saved_states.get(
+        if editor.frozen_preview:
+            return True
+        if editor.sheet_format is None or (editor.file_name and self._saved_states.get(
             page
-        ) == self._document_state(editor):
+        ) == self._document_state(editor)):
             return True
         self.documentTabs.setCurrentWidget(page)
         choice = QtWidgets.QMessageBox.question(
             self,
             "Save changes?",
-            f"Save changes to {editor.file_name}?",
+            f"Save changes to {editor.file_name or self.documentTabs.tabText(self.documentTabs.indexOf(page))}?",
             QtWidgets.QMessageBox.StandardButton.Save
             | QtWidgets.QMessageBox.StandardButton.Discard
             | QtWidgets.QMessageBox.StandardButton.Cancel,
@@ -3518,7 +3896,7 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         if choice == QtWidgets.QMessageBox.StandardButton.Cancel:
             return False
         if choice == QtWidgets.QMessageBox.StandardButton.Save:
-            return editor._save_document(editor.file_name)
+            return editor.save_action_trigger()
         return choice == QtWidgets.QMessageBox.StandardButton.Discard
 
     def close_document(self, index: int) -> bool:
@@ -3533,6 +3911,16 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
 
     def _dispose_document(self, page: QtWidgets.QWidget) -> None:
         editor = self._editors.pop(page)
+        if editor.point_preview is not None:
+            editor.point_preview.remove(editor)
+        if editor.workspace:
+            editor.workspace.dispose()
+        self._dispose_editor_resources(editor)
+        self._saved_states.pop(page, None)
+        page.deleteLater()
+        self._holders.pop(page).deleteLater()
+
+    def _dispose_editor_resources(self, editor: AnimationEditor) -> None:
         if self.batchEditDialog is not None and self.batchEditDialog.editor is editor:
             self.batchEditDialog.setEditor(self.current_editor)
         editor.undoStack.clear()
@@ -3553,22 +3941,21 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
         widget = editor.openGLWidget
         widget.cleanup_gl_resources()
         editor._shadow_display_images.clear()
-        self._saved_states.pop(page, None)
-        page.deleteLater()
-        self._holders.pop(page).deleteLater()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if not all(self._confirm_close(page) for page in self._editors):
             event.ignore()
             return
         self._saveWindowLayout()
+        self.linkedSourceTimer.stop()
         if self.batchEditDialog is not None:
             self.batchEditDialog.setEditor(None)
             self.batchEditDialog.close()
         self.menuBar().clear()
         self._active_editor = None
         for page in list(self._editors):
-            self._dispose_document(page)
+            if page in self._editors:
+                self._dispose_document(page)
         super().closeEvent(event)
 
 
@@ -3577,13 +3964,34 @@ def excepthook(
     exc_value: BaseException,
     exc_tb: TracebackType | None,
 ) -> None:
+    if issubclass(exc_type, KeyboardInterrupt):
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            # Exceptions in Qt callbacks do not unwind QApplication.exec().
+            app.exit(130)
+            return
     tb = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
     print(tb)
 
 
-if __name__ == "__main__":
-    sys.excepthook = excepthook
+def run_gui() -> int:
     app = QtWidgets.QApplication(sys.argv)
-    mainWindow = SpriteEditorWindow(app)
-    mainWindow.show()
-    sys.exit(app.exec())
+    previous_excepthook = sys.excepthook
+    previous_sigint = signal.signal(signal.SIGINT, lambda *_: app.exit(130))
+    sys.excepthook = excepthook
+    # Keep Python signal delivery responsive even when no preview is repainting.
+    interrupt_timer = QtCore.QTimer(app)
+    interrupt_timer.timeout.connect(lambda: None)
+    interrupt_timer.start(100)
+    try:
+        main_window = SpriteEditorWindow(app)
+        main_window.show()
+        return app.exec()
+    finally:
+        interrupt_timer.stop()
+        signal.signal(signal.SIGINT, previous_sigint)
+        sys.excepthook = previous_excepthook
+
+
+if __name__ == "__main__":
+    sys.exit(run_gui())

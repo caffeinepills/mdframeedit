@@ -10,7 +10,7 @@ a = Analysis(['main.py'],
              binaries=[],
              datas=[
                  (str(Path(SPECPATH) / file_name), '.')
-                 for file_name in ('icon.ico', 'LICENSE', 'README.md')
+                 for file_name in ('icon.ico', 'LICENSE', 'README.md', 'project.example.yaml')
              ],
              hiddenimports=[],
              hookspath=[],
@@ -46,7 +46,7 @@ coll = COLLECT(exe,
                name='MD Frame Editor')
 
 # Keep the documents visible beside the executable in one-folder builds.
-for file_name in ('LICENSE', 'README.md'):
+for file_name in ('LICENSE', 'README.md', 'project.example.yaml'):
     copy2(Path(SPECPATH) / file_name, Path(coll.name) / file_name)
 
 app = BUNDLE(coll,

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
@@ -72,13 +73,80 @@ class NativeFormatTest(unittest.TestCase):
         self.assertEqual(loaded.texture_name, "Chosen.png")
         with Image.open(target.with_suffix(".png")) as image:
             self.assertEqual(image.size, self.document.sheet_image.size)
-            self.assertEqual(image.tobytes(), self.document.sheet_image.tobytes())
+            self.assertEqual(image.convert("RGBA").tobytes(), self.document.sheet_image.tobytes())
         self.assertEqual(json.loads(target.read_bytes())["regions"], [[0, 0, 6, 8, 0, 0], [6, 0, 6, 8, 0, 0]])
         # Repeated saves are deterministic and ignore XML compression settings.
         original = target.read_bytes()
         loaded.trim_copies = loaded.collapse_singles = False
         self.save(loaded, "Chosen.json")
         self.assertEqual(target.read_bytes(), original)
+
+    def test_blank_multi_cells_preserve_timing_and_roundtrip_without_markers(self):
+        xml = self.document.export(self.root / "blank-source", SheetFormat.MULTI)
+        tree = ET.parse(xml)
+        anim = tree.find("Anims/Anim")
+        name = anim.findtext("Name")
+        w, h = int(anim.findtext("FrameWidth")), int(anim.findtext("FrameHeight"))
+        box = (w, 0, 2 * w, h)
+        for suffix in ("Anim", "Offsets", "Shadow"):
+            path = xml.with_name(f"{name}-{suffix}.png")
+            with Image.open(path) as source:
+                image = source.convert("RGBA")
+            image.paste((0, 0, 0, 0), box)
+            image.save(path)
+        source_bytes = {p.name: p.read_bytes() for p in xml.parent.iterdir()}
+
+        def check_blank(document):
+            group = document.groups[0]
+            self.assertEqual([f.duration for f in group.directions[0].frames], [3, 5])
+            self.assertEqual((group.rush_frame, group.hit_frame, group.return_frame), (0, 1, 1))
+            frame = group.directions[0].frames[1]
+            self.assertIsNone(document.image_grid[frame.frame_index].getbbox())
+            self.assertNotIn(frame.frame_index, document.action_points)
+
+        loaded = SpriteDocument.load(xml)
+        check_blank(loaded)
+        for number, format_name in enumerate((
+            SheetFormat.NATIVE, SheetFormat.SINGLE, SheetFormat.MULTI, SheetFormat.MULTI,
+        )):
+            loaded = SpriteDocument.load(loaded.export(self.root / f"blank-{number}", format_name))
+            check_blank(loaded)
+        self.assertEqual(source_bytes, {p.name: p.read_bytes() for p in xml.parent.iterdir()})
+
+        # A partially populated triplet must still fail.
+        for suffix, color in (("Anim", (20, 30, 40, 255)),
+                              ("Offsets", (255, 0, 0, 255)),
+                              ("Shadow", (255, 255, 255, 255))):
+            path = xml.with_name(f"{name}-{suffix}.png")
+            with Image.open(path) as source:
+                image = source.convert("RGBA")
+            image.putpixel((w, 0), color)
+            image.save(path)
+            with self.assertRaisesRegex(FormatError, "missing or ambiguous attachment markers"):
+                SpriteDocument.load(xml)
+            path.write_bytes(source_bytes[path.name])
+
+    def test_xml_ignores_cutscene_idle_in_both_formats(self):
+        for format_name in (SheetFormat.SINGLE, SheetFormat.MULTI):
+            with self.subTest(format=format_name):
+                xml = self.document.export(self.root / format_name.name, format_name)
+                baseline = SpriteDocument.load(xml)
+                tree = ET.parse(xml)
+                tree.getroot().insert(0, ET.Element("CutsceneIdle"))
+                tree.write(xml, encoding="utf-8", xml_declaration=True)
+                source = xml.read_bytes()
+
+                loaded = SpriteDocument.load(xml)
+                self.assert_document_equal(baseline, loaded)
+                self.assertEqual(xml.read_bytes(), source)
+                exported = loaded.export(self.root / (format_name.name + "-ignored"), format_name)
+                self.assertIsNone(ET.parse(exported).getroot().find("CutsceneIdle"))
+
+                # Ignoring this known runtime flag must not allow arbitrary tags.
+                tree.getroot().append(ET.Element("UnknownFlag"))
+                tree.write(xml, encoding="utf-8", xml_declaration=True)
+                with self.assertRaisesRegex(FormatError, "Unsupported AnimData/UnknownFlag"):
+                    SpriteDocument.load(xml)
 
     def test_native_xml_native_roundtrip_in_both_export_formats(self):
         native = SpriteDocument.load(self.save())

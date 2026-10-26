@@ -13,8 +13,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 
-FORMAT_FILES = {"native": "Sprite.json", "single": "FrameData.xml", "multi": "AnimData.xml",
-                "runtime": "Sprite.mdruntime"}
+FORMAT_FILES = {"native": "Sprite.json", "single": "FrameData.xml", "multi": "AnimData.xml"}
 
 
 @dataclass(frozen=True)
@@ -25,7 +24,8 @@ class ConversionJob:
     overwrite: bool = False
     trim_copies: bool = True
     collapse_singles: bool = True
-    filename: str | None = None
+    verify_png: bool = True
+    optimize_png: bool = True
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,6 @@ class ConversionResult:
     source: Path
     destination: Path
     error: str = ""
-    filename: str | None = None
 
 
 class ConversionError(Exception):
@@ -50,14 +49,21 @@ def positive_integer(value):
     return number
 
 
+def add_png_arguments(parser):
+    parser.add_argument("--no-png-verification", dest="verify_png", action="store_false",
+                        help="skip PNG pixel round-trip checks; keep format validation")
+    parser.add_argument("--no-png-optimization", dest="optimize_png", action="store_false",
+                        help="write ordinary RGBA PNGs without palette or compression optimization")
+
+
 def create_parser():
     parser = argparse.ArgumentParser(
-        description="Convert native JSON and XML sprites, or export runtime containers, without opening the editor.",
+        description="Convert native JSON and single-sheet/multi-sheet XML sprites without opening the editor.",
         epilog="Other commands: palette INPUT; build INPUT --profile PROFILE.yaml -o OUTPUT.",
     )
     parser.add_argument("input", type=Path, help="source JSON/XML file or sprite folder")
     parser.add_argument(
-        "--to", choices=FORMAT_FILES, required=True, help="destination format (runtime is export-only)"
+        "--to", choices=FORMAT_FILES, required=True, help="destination sheet format"
     )
     parser.add_argument(
         "-o",
@@ -91,13 +97,6 @@ def create_parser():
         help="allow replacing files in nonempty destination folders",
     )
     parser.add_argument(
-        "--runtime-layout",
-        choices=("tree", "flat", "spritecollab"),
-        default="tree",
-        help="runtime output layout: tree preserves folders; flat joins folder names with dashes; "
-             "spritecollab additionally pads numeric paths to four components (default: %(default)s)",
-    )
-    parser.add_argument(
         "--no-trim-copies",
         dest="trim_copies",
         action="store_false",
@@ -109,15 +108,13 @@ def create_parser():
         action="store_false",
         help="write all eight directions, including identical sequences",
     )
+    add_png_arguments(parser)
     return parser
 
 
 def plan_conversions(args):
     source = args.input.resolve()
     output = args.output.resolve()
-    layout = args.runtime_layout
-    if layout != "tree" and args.to != "runtime":
-        raise ConversionError("--runtime-layout flat/spritecollab requires --to runtime.")
     if not source.exists():
         msg = f"Input does not exist: {source}"
         raise ConversionError(msg)
@@ -131,8 +128,7 @@ def plan_conversions(args):
         root = source.parent
     else:
         root = source
-        expected = (["sprite.json", "framedata.xml", "animdata.xml"] if args.to == "runtime" else
-                    ["framedata.xml", "animdata.xml"] if args.to == "native" else
+        expected = (["framedata.xml", "animdata.xml"] if args.to == "native" else
                     ["sprite.json", FORMAT_FILES["multi" if args.to == "single" else "single"].casefold()])
         candidates = source.rglob("*") if args.recursive else source.iterdir()
         sources = sorted(
@@ -156,65 +152,38 @@ def plan_conversions(args):
                 "Use --recursive to search subfolders."
             )
             raise ConversionError(msg)
-    naming_root = root
-    if layout == "spritecollab":
-        # Keep the full numeric species/form/color/gender chain when input is
-        # a selected species, variant folder, or individual metadata file.
-        while len(naming_root.name) == 4 and naming_root.name.isascii() and naming_root.name.isdigit():
-            naming_root = naming_root.parent
-    jobs = []
-    for path in sources:
-        relative = path.parent.relative_to(root)
-        filename = None
-        if layout != "tree":
-            parts = relative.parts or (root.name,)
-            if layout == "spritecollab":
-                parts = path.parent.relative_to(naming_root).parts
-                if not 1 <= len(parts) <= 4 or any(
-                    len(part) != 4 or not part.isascii() or not part.isdigit() for part in parts
-                ):
-                    raise ConversionError(
-                        f"SpriteCollab layout requires one to four four-digit folder components: {path.parent}"
-                    )
-                parts = (*parts, *("0000" for _ in range(4 - len(parts))))
-            filename = "-".join(parts) + Path(FORMAT_FILES["runtime"]).suffix
-        jobs.append(ConversionJob(
-            path, output / relative if layout == "tree" else output,
-            args.to, args.overwrite, args.trim_copies, args.collapse_singles, filename,
-        ))
+    jobs = [
+        ConversionJob(path, output / path.parent.relative_to(root), args.to,
+                      args.overwrite, args.trim_copies, args.collapse_singles,
+                      args.verify_png, args.optimize_png)
+        for path in sources
+    ]
     source_folders = {path.parent for path in sources}
-    destinations = {}
+    destinations = set()
     for job in jobs:
         if job.destination in source_folders:
             msg = f"Choose an output folder separate from the source sprites: {job.destination}"
             raise ConversionError(msg)
-        key = str(job.destination / job.filename if job.filename else job.destination).casefold()
+        key = str(job.destination).casefold()
         if key in destinations:
-            msg0 = f"Multiple sprites would write to the same destination: {destinations[key]} and {job.source}"
+            msg0 = f"Multiple sprites would write to the same destination: {job.destination}"
             raise ConversionError(msg0)
-        destinations[key] = job.source
+        destinations.add(key)
     return jobs
 
 
 def convert_job(job):
-    """Convert a document into its planned bundle, sharing a folder when named."""
+    """Convert an independent document and write to its own folder."""
     try:
-        if job.filename:
-            targets = (job.destination / job.filename,
-                       job.destination / Path(job.filename).with_suffix(".png").name)
-            contains_files = any(path.exists() for path in targets)
-        else:
-            contains_files = job.destination.is_dir() and any(
-                not path.is_dir() for path in job.destination.iterdir()
-            )
         if job.destination.exists() and (
             not job.destination.is_dir()
-            or (not job.overwrite and contains_files)
+            or (not job.overwrite and any(not path.is_dir() for path in job.destination.iterdir()))
         ):
             msg = f"Destination already contains files; use --overwrite to replace them: {job.destination}"
             raise ConversionError(msg)
         from conversion import SpriteDocument
         from data import SheetFormat
+        from utils import png_save_options
 
         document = SpriteDocument.load(job.source)
         source_format = {SheetFormat.NATIVE: "native", SheetFormat.SINGLE: "single", SheetFormat.MULTI: "multi"}[document.sheet_format]
@@ -223,13 +192,13 @@ def convert_job(job):
             raise ConversionError(msg_0)
         document.trim_copies = job.trim_copies
         document.collapse_singles = job.collapse_singles
-        target = {"native": SheetFormat.NATIVE, "single": SheetFormat.SINGLE,
-                  "multi": SheetFormat.MULTI, "runtime": SheetFormat.RUNTIME}[job.target_format]
-        document.export(job.destination, target, filename=job.filename)
-        return ConversionResult(job.source, job.destination, filename=job.filename)
+        target = {"native": SheetFormat.NATIVE, "single": SheetFormat.SINGLE, "multi": SheetFormat.MULTI}[job.target_format]
+        with png_save_options(verify=job.verify_png, optimize=job.optimize_png):
+            document.export(job.destination, target)
+        return ConversionResult(job.source, job.destination)
     except Exception as error:
         return ConversionResult(
-            job.source, job.destination, str(error) or type(error).__name__, job.filename
+            job.source, job.destination, str(error) or type(error).__name__
         )
 
 
@@ -348,7 +317,7 @@ def main(argv=None):
             else:
                 successes += 1
                 print(
-                    f"OK {result.source} -> {result.destination / (result.filename or FORMAT_FILES[args.to])}",
+                    f"OK {result.source} -> {result.destination / FORMAT_FILES[args.to]}",
                     flush=True,
                 )
     except KeyboardInterrupt:
@@ -364,7 +333,7 @@ def main(argv=None):
 def build_main(argv: list[str]) -> int:
     """Build sprites recursively using one editable project profile."""
     from project import build_sprite, load_profile, plan_builds
-    from utils import FormatError
+    from utils import FormatError, png_save_options
 
     parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} build",
         description="Build packed sprites from a source file or folder tree using one YAML project profile.")
@@ -372,6 +341,7 @@ def build_main(argv: list[str]) -> int:
     parser.add_argument("--profile", type=Path, required=True, help="editable project profile YAML")
     parser.add_argument("-o", "--output", type=Path, required=True, help="destination folder (preserves relative sprite folders)")
     parser.add_argument("--overwrite", action="store_true", help="replace generated files in an existing output folder")
+    add_png_arguments(parser)
     args = parser.parse_args(argv)
     try:
         profile = load_profile(args.profile)
@@ -387,7 +357,8 @@ def build_main(argv: list[str]) -> int:
     successes = failures = 0
     for job in jobs:
         try:
-            target = build_sprite(job.source, profile, job.destination, overwrite=args.overwrite)
+            with png_save_options(verify=args.verify_png, optimize=args.optimize_png):
+                target = build_sprite(job.source, profile, job.destination, overwrite=args.overwrite)
         except (FormatError, OSError, ValueError, ET.ParseError) as error:
             failures += 1
             print(f"FAILED {job.source}: {error}", file=sys.stderr, flush=True)

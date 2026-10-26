@@ -1,8 +1,8 @@
 """In-memory Action Point previews over independently owned editor documents."""
 from __future__ import annotations
 
-import time
 import copy
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from uuid import uuid4
@@ -10,21 +10,21 @@ from uuid import uuid4
 import pyglet
 from PySide6 import QtCore, QtWidgets
 
-from gui import ScreenFitDialog
-from gui.preview import TopLeftGrid, PreviewColumnGroup
 from data import SheetFormat
+from gui import ScreenFitDialog
+from gui.preview import PreviewColumnGroup, TopLeftGrid
 from preview import (
+    PREVIEW_FILTER,
+    PREVIEW_SUFFIX,
+    SHADOW_ANCHOR,
     ActionPointRelationship,
     Presentation,
     ResolutionFailure,
+    preview_save_path,
     resolve_relationship,
     sample_sequence,
     sample_sprite,
     synchronized_time,
-    PREVIEW_SUFFIX,
-    PREVIEW_FILTER,
-    SHADOW_ANCHOR,
-    preview_save_path,
 )
 from project import available_point_names
 
@@ -684,14 +684,21 @@ class ActionPointPreview:
                               source.ui.spriteOpacitySlider.value(), identity=identity)
                 if source is viewer and viewer.sprite:
                     viewer.sprite.position = sprite.position
-        member = next((m for m in self.members if m.editor is viewer), None)
-        if member and member.identity in results and viewer.ui.showActionPointsCheckBox.isChecked():
-            sample = results[member.identity][0]
-            for index, name in enumerate(sample.action_points):
+        # Display settings belong to each source, independently of the tab whose
+        # GL context is drawing the assembly. Include identity for shared names.
+        for order, identity in enumerate(self.order):
+            member = next((m for m in self.members if m.identity == identity), None)
+            if member is None or not member.visible or identity not in results:
+                continue
+            source = member.editor
+            if not source.ui.showActionPointsCheckBox.isChecked():
+                continue
+            sample = results[identity][0]
+            for name in sample.action_points:
                 position = sample.rendered_point(name)
-                image = viewer.actionPointMarker(name)
-                draw(("point", name), image, 1, 1, 0, position, False,
-                     1000 + index, id(image), viewer.ui.actionPointsOpacitySlider.value(), identity=member.identity)
+                image = source.actionPointMarker(name)
+                draw(("point", identity, name), image, 1, 1, 0, position, False,
+                     1000 + order, image, source.ui.actionPointsOpacitySlider.value(), identity=identity)
         self.update_label(viewer)
 
 

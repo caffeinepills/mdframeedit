@@ -698,6 +698,7 @@ class AnimationEditor(AnimationSerialization):
         combo.setVisible(project is not None)
         self.ui.loadRigProfileButton.setVisible(project is None)
         self.ui.unlinkRigProfileButton.setVisible(project is None)
+        combo.setEnabled(self.image_grid is not None and not self.frozen_preview)
         with QtCore.QSignalBlocker(combo):
             combo.clear()
             if project is None:
@@ -719,7 +720,6 @@ class AnimationEditor(AnimationSerialization):
                     combo.setItemData(combo.count() - 1, str(self.rig_profile), QtCore.Qt.ItemDataRole.ToolTipRole)
                     index = combo.count() - 1
                 combo.setCurrentIndex(index)
-        combo.setEnabled(self.image_grid is not None and not self.frozen_preview)
 
     def choose_project_rig(self, index: int) -> None:
         host = self.document_host
@@ -780,7 +780,7 @@ class AnimationEditor(AnimationSerialization):
         self.ui.sheetFramePicture.setToolTip(
             f"Action Point: {name or '(none)'}. Drag a dot to move it; Escape cancels.")
         self.ui.sheetFramePicture.update()
-        selected = self.selected_sheet_frame is not None and name is not None
+        selected = self.selected_sheet_frame is not None and name is not None and not self.frozen_preview
         with QtCore.QSignalBlocker(ui.pointDefinedCheckBox):
             ui.pointDefinedCheckBox.setChecked(point is not None)
             ui.pointDefinedCheckBox.setEnabled(selected)
@@ -810,10 +810,10 @@ class AnimationEditor(AnimationSerialization):
             "Choose a named rig from a YAML Project Profile, or load a standalone YAML Rig Profile."
             + ("\nCurrent: " + profile.name if profile else "")
             + ("\n" + profile_details if self.rig_profile else ""))
-        ui.unlinkRigProfileButton.setEnabled(self.rig_profile is not None)
-        ui.loadRigProfileButton.setEnabled(self.image_grid is not None)
+        ui.unlinkRigProfileButton.setEnabled(self.rig_profile is not None and not self.frozen_preview)
+        ui.loadRigProfileButton.setEnabled(self.image_grid is not None and not self.frozen_preview)
         self.refresh_project_rig_selector()
-        ui.addActionPointButton.setEnabled(self.image_grid is not None)
+        ui.addActionPointButton.setEnabled(self.image_grid is not None and not self.frozen_preview)
         self.updateActionPointActions()
 
     def promptLocalPoint(self):
@@ -1087,7 +1087,7 @@ class AnimationEditor(AnimationSerialization):
             for spinBox, value in zip(spinBoxes, offset.data()):
                 with QtCore.QSignalBlocker(spinBox):
                     spinBox.setValue(value)
-                    spinBox.setEnabled(index is not None)
+                    spinBox.setEnabled(index is not None and not self.frozen_preview)
         self.refreshNamedPointControls()
         self.refreshSheetFramePreview()
 
@@ -3607,12 +3607,16 @@ class SpriteEditorWindow(QtWidgets.QMainWindow):
                 editor.ui.actionListWidget.setCurrentRow(0)
                 editor.ui.actionListWidget.item(0).mouseClickEvent(None)
             editor.frozen_preview = True
+            editor.refreshNamedPointControls()
             editor.frozen_snapshot_id = uuid4().hex
             editor.frozen_origin_label = source_label
             editor.untitled_name = name
             editor.setArtworkReloadEnabled(False)
-            # Disable authoring containers so selection updates cannot re-enable edits.
-            for widget in (editor.ui.actionPointsGroupBox, editor.ui.groupBox_7,
+            # Keep point selection and display controls available for inspection.
+            # Point/rig editors also enforce read-only state when refreshed.
+            for widget in (editor.ui.pointDefinedCheckBox, *editor.ui.namedPointSpinBoxes,
+                           *(spin for spins in editor.ui.actionPointSpinBoxes.values() for spin in spins),
+                           editor.ui.groupBox_7,
                            editor.ui.frameDataPanel, editor.ui.shadowSizeComboBox,
                            editor.ui.sheetFramePicture, editor.ui.actionAddButton,
                            editor.ui.actionDuplicateButton, editor.ui.actionDeleteButton,

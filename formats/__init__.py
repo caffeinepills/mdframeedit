@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
 
 from data import SheetFormat
 from utils import FormatError
-from . import runtime
 from .exported import detect_format, validate_source
 from .exported import validate_export as validate_xml_export
 
@@ -186,32 +185,8 @@ class MultiSheetFormat(_MysteryDungeonFormat):
     sheet_format = SheetFormat.MULTI
 
 
-class RuntimeFormat(SpriteFormat):
-    """Export-only, packed game metadata and an independently loadable PNG."""
-
-    format_id = "runtime"
-    default_filename = "Sprite.mdruntime"
-
-    @property
-    def document_format(self) -> SheetFormat:
-        return SheetFormat.RUNTIME
-
-    def read(self, path: Path, document_class: type[DocumentT]) -> DocumentT:
-        raise FormatError("Runtime containers are export-only; open the native JSON or XML source to edit.")
-
-    def validate_export(self, document: SpriteDocument) -> None:
-        runtime._encode(document, "Sprite.png")
-
-    def write(self, document: SpriteDocument, directory: Path, filename: str) -> None:
-        runtime.write_document(document, directory / filename)
-
-    def validate_written(self, directory: Path, filename: str, document_class: type[DocumentT]) -> None:
-        runtime.validate_written(directory / filename)
-
-
 _BUILTINS: dict[SheetFormat, SpriteFormat] = {
     SheetFormat.NATIVE: NativeFormat(),
-    SheetFormat.RUNTIME: RuntimeFormat(),
     SheetFormat.SINGLE: SingleSheetFormat(),
     SheetFormat.MULTI: MultiSheetFormat(),
 }
@@ -228,8 +203,6 @@ def detect_adapter(path: Path) -> SpriteFormat:
     """Retain built-in automatic detection; custom formats are explicit."""
     if path.suffix.lower() == ".json":
         return _BUILTINS[SheetFormat.NATIVE]
-    if path.suffix.lower() == ".mdruntime":
-        return _BUILTINS[SheetFormat.RUNTIME]
     return _BUILTINS[detect_format(ET.parse(path).getroot())]
 
 
@@ -242,6 +215,6 @@ def validate_export(
     get_adapter(format_name).validate_export(document)
 
 __all__ = [
-    "DocumentT", "FormatError", "MultiSheetFormat", "NativeFormat", "RuntimeFormat", "SingleSheetFormat",
+    "DocumentT", "FormatError", "MultiSheetFormat", "NativeFormat", "SingleSheetFormat",
     "SpriteFormat", "detect_adapter", "detect_format", "get_adapter", "validate_export", "validate_source",
 ]

@@ -19,7 +19,7 @@ from data import (
     Offset,
     SheetFormat,
 )
-from utils import FormatError
+from utils import FormatError, save_png
 from .packing import NativeRegion, TextureLayout, grid_layout, pack_texture, unpack_texture
 
 if TYPE_CHECKING:
@@ -415,7 +415,7 @@ def _write_document(
     data = _document_data(document, texture, layout)
     if "rig_profile" in data:
         data["rig_profile"] = relative_sprite_path(document.rig_profile, path.parent)
-    image.save(path.with_name(texture), format="PNG")
+    save_png(image, path.with_name(texture))
     path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
 
 

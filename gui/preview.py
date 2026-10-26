@@ -1,7 +1,6 @@
 """GL preview surface, camera, texture grids and point marker rendering."""
 from __future__ import annotations
 
-import sys
 from typing import TYPE_CHECKING
 
 import pyglet
@@ -533,7 +532,8 @@ class PygletWidget(QOpenGLWidget):
                 f"Could not compile shader. Requires OpenGL 3.3 capability."
             )
             self.error_dialog.exec()
-            sys.exit(app.exec())
+            QtWidgets.QApplication.exit(1)
+            return
 
         self.ubo = self._default_program.uniform_blocks["WindowBlock"].create_ubo()
 

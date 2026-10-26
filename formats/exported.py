@@ -60,11 +60,12 @@ def validate_source(
         msg = f"This is {format_name.value} data; use its matching loader."
         raise FormatError(msg)
     single = format_name == SheetFormat.SINGLE
+    # Runtime-only idle behavior is intentionally ignored by the editor.
     known_children(
         root,
-        {"ShadowSize", "Anims", "FrameWidth", "FrameHeight"}
+        {"CutsceneIdle", "ShadowSize", "Anims", "FrameWidth", "FrameHeight"}
         if single
-        else {"ShadowSize", "Anims"},
+        else {"CutsceneIdle", "ShadowSize", "Anims"},
     )
     if integer(root, "ShadowSize", 1) not in (0, 1, 2):
         msg = "ShadowSize must be 0 (small), 1 (normal) or 2 (large)."
@@ -246,9 +247,14 @@ def _validate_multi_markers(
         offsets = source.convert("RGBA")
     with Image.open(path.parent / f"{name}-Shadow.png") as source:
         shadows = source.convert("RGBA")
+    with Image.open(path.parent / f"{name}-Anim.png") as source:
+        sprites = source.convert("RGBA")
     for row in range(rows):
         for column in range(columns):
             box = (column * w, row * h, (column + 1) * w, (row + 1) * h)
+            # Entirely empty triplets are transparent timed frames, not broken markers.
+            if all(image.crop(box).getbbox() is None for image in (sprites, offsets, shadows)):
+                continue
             colors = offsets.crop(box).getcolors(w * h)
             counts = [
                 sum(
@@ -402,12 +408,27 @@ def _validate_export_sequence(
         ):
             msg = f"{name}: invalid duration, frame index or flip."
             raise FormatError(msg)
-        if not single and frame.frame_index not in editor.action_points:
+        if (
+            not single
+            and frame.frame_index not in editor.action_points
+            and _frame_has_artwork(editor, frame.frame_index)
+        ):
             msg = (
                 f"{name}: attachment points are unavailable; "
                 "cannot create AnimData.xml losslessly."
             )
             raise FormatError(msg)
+
+
+def _frame_has_artwork(editor, index: int) -> bool:
+    region = editor.image_grid[index]
+    image = (
+        region if isinstance(region, Image.Image) else Image.frombytes(
+            "RGBA", (region.width, region.height),
+            region.get_image_data().get_data("RGBA", -region.width * 4),
+        )
+    )
+    return image.getbbox() is not None
 
 
 def _validate_export_action_points(

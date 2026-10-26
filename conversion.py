@@ -34,6 +34,7 @@ from utils import (
     integer,
     overlap_colors,
     round_up_to_mult,
+    save_png,
     template_image,
     write_xml,
 )
@@ -554,6 +555,9 @@ class SpriteDocument(AnimationSerialization):
                     max_width = max(max_width, cropped.width, point_bounds.width)
                     max_height = max(max_height, cropped.height, point_bounds.height)
                     anchor = get_shadow_location_from_pil_image(shadows.crop(box))
+                    if anchor is None:
+                        # Validated empty triplets retain their timeline slot without points.
+                        anchor = Offset(width // 2, height // 2)
                     frame = AnimFrame(
                         len(group.directions[direction].frames),
                         duration=duration,
@@ -586,6 +590,8 @@ class SpriteDocument(AnimationSerialization):
                     y + height // 2 - image.height // 2,
                 ),
             )
+            if not points[index].items():
+                continue
             positions = defaultdict(list)
             for point, color in zip(
                 points[index].all_pos(),
@@ -758,8 +764,7 @@ class SpriteDocument(AnimationSerialization):
 
     def _write_single_sheet(self, directory):
         self.write_single_xml(str(directory / "FrameData.xml"))
-        with open(directory / "Anim.png", "wb") as output:
-            self.sheet_image.save(output, format="PNG")
+        save_png(self.sheet_image, directory / "Anim.png")
         changed_points = {
             index: body
             for index, body in self.action_points.items()
@@ -802,10 +807,9 @@ class SpriteDocument(AnimationSerialization):
                     positions[(x + point.x, y + point.y)].append(color)
                 for position, color in overlap_colors(positions).items():
                     draw.point(position, color)
-            image.save(directory / "Offsets.png")
+            save_png(image, directory / "Offsets.png")
         elif self.action_pt_image is not None:
-            with open(directory / "Offsets.png", "wb") as output:
-                self.action_pt_image.save(output, format="PNG")
+            save_png(self.action_pt_image, directory / "Offsets.png")
 
     def _write_multiple_sheets(self, directory):
         shadow = self.shadow_image
@@ -829,6 +833,9 @@ class SpriteDocument(AnimationSerialization):
                         region = self.image_grid[frame.frame_index]
                         tiles[frame.frame_index] = region
                     tile = tiles[frame.frame_index]
+                    if frame.frame_index not in self.action_points and tile.getbbox() is None:
+                        row.append(None)
+                        continue
                     image = (
                         tile.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
                         if frame.flip
@@ -886,7 +893,10 @@ class SpriteDocument(AnimationSerialization):
             shadows = Image.new("RGBA", size)
             draw = ImageDraw.Draw(offsets)
             for row_index, row in enumerate(prepared):
-                for column, (sprite, sx, sy, points, shadow, mx, my) in enumerate(row):
+                for column, prepared_frame in enumerate(row):
+                    if prepared_frame is None:
+                        continue
+                    sprite, sx, sy, points, shadow, mx, my = prepared_frame
                     cx, cy = (
                         column * width + width // 2,
                         row_index * height + height // 2,
@@ -911,5 +921,5 @@ class SpriteDocument(AnimationSerialization):
                 ("Offsets", offsets),
                 ("Shadow", shadows),
             ):
-                image.save(directory / f"{group.name}-{suffix}.png")
+                save_png(image, directory / f"{group.name}-{suffix}.png")
         self.write_multi_xml(str(directory / "AnimData.xml"), group_sizes)
